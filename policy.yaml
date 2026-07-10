@@ -1,0 +1,15 @@
+version: 1
+diagnostics: false
+
+# Start in audit mode. Change a policy to enforce only after reviewing its
+# BPF LSM events and confirming the allowed UID/process scope is complete.
+policies:
+  - id: 1001
+    name: protect_tmp_rzh
+    mode: audit
+    paths:
+      - /etc/tmp_rzh
+    # Keep the audit profile observable. Add explicitly trusted UIDs only
+    # after reviewing events and before changing mode to enforce.
+    allowed_uids: []
+    expires_after: ""

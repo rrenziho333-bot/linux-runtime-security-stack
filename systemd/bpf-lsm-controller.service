@@ -1,0 +1,29 @@
+[Unit]
+Description=Map-driven BPF LSM policy controller
+Documentation=file:/home/zhaoren/ebpf/SECURITY_STACK.md
+After=local-fs.target
+Before=tsa-fusion.service
+ConditionPathExists=/etc/bpf-lsm/policy.yaml
+
+[Service]
+Type=simple
+User=root
+Group=adm
+ExecStartPre=/usr/bin/install -d -o root -g adm -m 0750 /var/log/bpf-lsm
+ExecStart=/usr/local/sbin/bpf-lsm-controller -config /etc/bpf-lsm/policy.yaml -output /var/log/bpf-lsm/events.jsonl
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=15
+UMask=0027
+NoNewPrivileges=true
+ProtectHome=read-only
+ProtectSystem=strict
+ReadWritePaths=/var/log/bpf-lsm
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictRealtime=true
+LockPersonality=true
+
+[Install]
+WantedBy=multi-user.target

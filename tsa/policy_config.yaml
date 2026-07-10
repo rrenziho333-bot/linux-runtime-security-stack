@@ -1,0 +1,229 @@
+meta:
+  policy_id: "tsa-fusion-v1"
+  version: "2.0.0"
+
+storage:
+  state_db: "state/tsa.db"
+  report_path: "reports/last_scan.json"
+
+scoring:
+  weights:
+    posture: 0.4
+    runtime: 0.6
+
+reporting:
+  interval_seconds: 300
+  retention_days: 30
+
+maintenance:
+  file: "/run/tsa-fusion/maintenance"
+
+# BPF LSM只把已经发生的审计/拒绝事件交给TSA评分。TSA不直接修改BPF map。
+bpf_lsm:
+  enabled: true
+  log_path: "/var/log/bpf-lsm/events.jsonl"
+  start_at_end: true
+  action_points:
+    audit: 2
+    deny: 8
+  risk_ttl_by_action:
+    audit: 900
+    deny: 14400
+  policy_points:
+    1001:
+      audit: 2
+      deny: 10
+  event_control:
+    dedup_window: 60
+    max_points_per_minute: 10
+    risk_ttl_seconds: 3600
+
+  whitelist:
+    proc_names:
+      - falcoctl
+    users: []
+    paths_prefix: []
+
+# --- 1. 静态姿态检查 (Posture: 基线与配置) ---
+
+baseline_lynis:
+  enabled: true
+
+  # TSA 是否负责执行 lynis（需要 root）；否则就只读 report 文件
+  run_lynis: false
+  lynis_cmd: "lynis audit system --quick --quiet"
+  report_path: "/home/zhaoren/桌面/lynis-report.dat"
+
+  # 评分策略：默认只扣 warnings（建议先这样，最稳）
+  scoring_mode: "warnings_only"   # 可选: warnings_only | warnings_and_selected_suggestions
+
+  # 你“采纳”的 Lynis 控制项（示例：这里放最通用的一批）
+  # 命中这些 control id 才扣分；没在列表里就忽略（降低噪音）
+  include_controls:
+    - "PKGS-7392" #已知漏洞包/需要安全更新（包管理与补丁）
+    - "SSH-7412" #ssh登陆
+    - "SSH-7408" #SSH 配置
+    - "AUTH-9262" #认证/口令策略（密码强度、过期、策略）
+    - "AUTH-9328" #认证相关的另一项控制（同属账号/认证域）
+    - "KRNL-5820" #认证相关的另一项控制（同属账号/认证域）
+    - "LOGG-2190" #内核/系统参数安全（例如 core dump、sysctl 等）
+    - "FIRE-4513" #防火墙/网络边界（是否启用、规则存在等
+    - "BOOT-5122" #启动链路/引导器安全（GRUB/启动保护等）
+
+  # 每个 control 的扣分（没写就走 default_deduct）
+  deduct_by_control:
+    "PKGS-7392": 15
+    "SSH-7412": 20
+    "SSH-7408": 10
+    "AUTH-9262": 10
+    "AUTH-9328": 5
+    "KRNL-5820": 5
+    "LOGG-2190": 5
+    "FIRE-4513": 5
+    "BOOT-5122": 5
+
+  default_deduct:
+    warning: 10
+    suggestion: 0
+
+# --- 2. 动态运行时监控 (Runtime: Falco) ---
+
+runtime_rules:
+  enabled: true
+  log_path: "/var/log/falco/falco.json"
+  start_at_end: true
+  poll_interval: 1
+  
+  # 初始运行时分数
+  init_score: 100 
+  
+  # 风险按事件生命周期自动过期，而不是永久累计或全局缓慢回血。
+  event_control:
+    dedup_window: 60
+    max_points_per_minute: 10
+    max_active_points_per_rule: 20
+    risk_ttl_seconds: 3600
+
+  risk_ttl_by_priority:
+    DEBUG: 300
+    INFO: 300
+    NOTICE: 900
+    WARNING: 3600
+    ERROR: 14400
+    CRITICAL: 86400
+    ALERT: 86400
+    EMERGENCY: 86400
+
+  # 扣分规则
+  specific_rules:
+    "Adding ssh keys to authorized_keys": 5
+    "BPF Program Not Profiled": 2
+    "Backdoored library loaded into SSHD (CVE-2024-3094)": 5
+    "Basic Interactive Reconnaissance": 2
+    "Change namespace privileges via unshare": 2
+    "Change thread namespace": 2
+    "Clear Log Activities": 5
+    "Contact EC2 Instance Metadata Service From Container": 2
+    "Contact K8S API Server From Container": 2
+    "Contact cloud metadata service from container": 2
+    "Container Drift Detected (chmod)": 10
+    "Container Drift Detected (open+create)": 10
+    "Container Run as Root User": 0
+    "Create Hardlink Over Sensitive Files": 5
+    "Create Hidden Files or Directories": 2
+    "Create Symlink Over Sensitive Files": 5
+    "Create files below dev": 10
+    "DB program spawned process": 2
+    "Debugfs Launched in Privileged Container": 5
+    "Decoding Payload in Container": 0
+    "Delete or rename shell history": 5
+    "Detect crypto miners using the Stratum protocol": 20
+    "Detect outbound connections to common miner pool ports": 20
+    "Detect release_agent File Container Escapes": 20
+    "Directory traversal monitored file read": 5
+    "Disallowed SSH Connection Non Standard Port": 2
+    "Drop and execute new binary in container": 20
+    "Execution from /dev/shm": 5
+    "Exfiltrating Artifacts via Kubernetes Control Plane": 2
+    "Fileless execution via memfd_create": 20
+    "Find AWS Credentials": 5
+    "Interpreted procs inbound network activity": 2
+    "Interpreted procs outbound network activity": 2
+    "Java Process Class File Download": 20
+    "Kubernetes Client Tool Launched in Container": 5
+    "Launch Disallowed Container": 5
+    "Launch Excessively Capable Container": 0
+    "Launch Ingress Remote File Copy Tools in Container": 2
+    "Launch Package Management Process in Container": 10
+    "Launch Privileged Container": 0
+    "Launch Remote File Copy Tools in Container": 2
+    "Launch Sensitive Mount Container": 0
+    "Launch Suspicious Network Tool in Container": 2
+    "Launch Suspicious Network Tool on Host": 2
+    "Linux Kernel Module Injection Detected": 5
+    "Mkdir binary dirs": 10
+    "Modify Container Entrypoint": 5
+    "Modify Shell Configuration File": 5
+    "Modify binary dirs": 10
+    "Monitor specific file access":
+      points: 5
+      dedup_window: 15
+      max_points_per_minute: 20
+      risk_ttl_seconds: 3600
+    "Mount Launched in Privileged Container": 5
+    "Netcat Remote Code Execution in Container": 5
+    "Netcat/Socat Remote Code Execution on Host": 5
+    "Network Connection outside Local Subnet": 5
+    "Non sudo setuid": 2
+    "PTRACE anti-debug attempt": 2
+    "PTRACE attached to process": 5
+    "Packet socket created in container": 2
+    "Polkit Local Privilege Escalation Vulnerability (CVE-2021-4034)": 20
+    "Potential Local Privilege Escalation via Environment Variables Misuse": 2
+    "Program run with disallowed http proxy env": 2
+    "Read Shell Configuration File": 5
+    "Read environment variable from /proc files": 5
+    "Read sensitive file trusted after startup": 5
+    "Read sensitive file untrusted": 5
+    "Read ssh information": 10
+    "Redirect STDOUT/STDIN to Network Connection in Container": 2
+    "Remove Bulk Data from Disk": 5
+    "Run shell untrusted": 2
+    "Schedule Cron Jobs": 2
+    "Search Private Keys or Passwords": 5
+    "Set Setuid or Setgid bit": 2
+    "Sudo Potential Privilege Escalation": 20
+    "System procs network activity": 2
+    "System user interactive": 0
+    "Terminal shell in container": 2
+    "Unexpected K8s NodePort Connection": 2
+    "Unexpected UDP Traffic": 2
+    "Unexpected inbound connection source": 2
+    "Unprivileged Delegation of Page Faults Handling to a Userspace Process": 20
+    "Update Package Repository": 2
+    "User mgmt binaries": 2
+    "Write below binary dir": 10
+    "Write below etc": 10
+    "Write below monitored dir": 10
+    "Write below root": 10
+    "Write below rpm database": 10
+  
+  # 兜底优先级扣分
+  priority_mapping:
+    EMERGENCY: 40
+    ALERT: 30
+    CRITICAL: 20
+    ERROR: 10
+    WARNING: 5
+    NOTICE: 2
+    INFO: 0
+    DEBUG: 0
+    
+  # ✅ 新增：MITRE tags 加权（可选）
+  # Falco JSON 里 tags 可能有 "T1555" 或 "mitre_credential_access" 之类
+  tag_weight_mode: "max"   # max | add
+  tag_mapping:
+    "T1555": 25                      # Credentials from Password Stores
+    "mitre_credential_access": 20
+    "T1059": 15                      # Command and Scripting Interpreter
+    "mitre_execution": 10

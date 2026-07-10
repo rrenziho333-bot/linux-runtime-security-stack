@@ -1,0 +1,24 @@
+# Local editor and scratch files
+*.swp
+*~
+teeeeeee.*
+okfile.txt
+
+# Build outputs
+/bpf-lsm-controller
+/lsm-block
+/lsm_block_write.bpf.o
+*.test
+
+# Downloaded toolchain archives
+go*.linux-amd64.tar.gz
+
+# Runtime data
+state/
+reports/
+__pycache__/
+*.pyc
+/tsa/state/
+/tsa/reports/
+/tsa/__pycache__/
+/tsa/tests/__pycache__/

@@ -1,0 +1,29 @@
+[Unit]
+Description=TSA Falco, BPF LSM, and Lynis risk fusion agent
+Documentation=file:/home/zhaoren/ebpf/SECURITY_STACK.md
+After=falco-modern-bpf.service bpf-lsm-controller.service
+Wants=falco-modern-bpf.service
+
+[Service]
+Type=simple
+User=zhaoren
+Group=zhaoren
+SupplementaryGroups=adm
+WorkingDirectory=/home/zhaoren/ebpf/tsa
+ExecStart=/usr/bin/python3 /home/zhaoren/ebpf/tsa/tsa_fusion.py --config /home/zhaoren/ebpf/tsa/policy_config.yaml
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=15
+UMask=0027
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/zhaoren/ebpf/tsa/state /home/zhaoren/ebpf/tsa/reports
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictRealtime=true
+LockPersonality=true
+
+[Install]
+WantedBy=multi-user.target

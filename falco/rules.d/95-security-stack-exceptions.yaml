@@ -1,0 +1,12 @@
+# Linux comm names are limited to 15 visible characters, so
+# bpf-lsm-controller appears to Falco as bpf-lsm-control.
+- list: bpf_profiled_binaries
+  override:
+    items: append
+  items: [bpf-lsm-control]
+
+- macro: user_known_write_below_root_activities
+  override:
+    condition: append
+  condition: >
+    or (proc.name = falcoctl and fd.name startswith /root/.sigstore/)
