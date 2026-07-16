@@ -1,0 +1,14 @@
+source=manual:github-falcosecurity-rules
+fetched_utc=2026-07-16T17:42:00Z
+files=falco_rules.yaml falco-sandbox_rules.yaml falco-incubating_rules.yaml
+rule_count=25+37+31=93 unique rules
+tsa_scored_mapping=86 of these rules have explicit deduction weights in tsa/policy_config.yaml
+
+This directory mirrors Falco's official rules for offline analysis.
+Source: https://github.com/falcosecurity/rules (Apache-2.0).
+The deployed rules remain those shipped by the installed falco package;
+this is a committed snapshot for reading and analysis.
+
+To regenerate with your installed falco version, run:
+  ../../falco/fetch-official-rules.sh            # from /etc/falco
+  ../../falco/fetch-official-rules.sh --remote-url <tarball-url>
