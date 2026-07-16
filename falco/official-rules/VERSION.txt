@@ -3,6 +3,11 @@ fetched_utc=2026-07-16T17:42:00Z
 files=falco_rules.yaml falco-sandbox_rules.yaml falco-incubating_rules.yaml
 rule_count=25+37+31=93 unique rules
 tsa_scored_mapping=86 of these rules have explicit deduction weights in tsa/policy_config.yaml
+snapshot_version=2025 (per Copyright 2025 in file headers; exact release tag unknown)
+version_note=This snapshot is newer than the README's target Falco 0.42.1 (2023). Rule names
+  mostly overlap, so the 86/93 scoring mapping still holds, but a few rules may be added,
+  renamed, or unweighted across versions. For analysis aligned to your installed falco,
+  regenerate this snapshot with fetch-official-rules.sh (local copy from /etc/falco).
 
 This directory mirrors Falco's official rules for offline analysis.
 Source: https://github.com/falcosecurity/rules (Apache-2.0).
