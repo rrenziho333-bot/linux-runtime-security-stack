@@ -7,7 +7,7 @@
 Falco、Go 工具链。内核 BPF LSM 是**可选**的——有它则启用内核级阻断，没有它则自动
 降级为纯检测（见第 9 节）。本文依次解决。
 
-> 操作系统示例以 Fedora / Ubuntu 为主。其他发行版请按等价命令替换包管理器。
+> 操作系统示例以 Ubuntu / Debian 为主（本项目的目标场景）。
 
 ## 0. 适用平台与权限
 
@@ -50,16 +50,6 @@ grep -w bpf /sys/kernel/security/lsm
 把 `bpf` 追加到 `lsm=` 启动参数。顺序要求：`lsm=` 是逗号分隔，`bpf` 必须在
 `integrity`（若启用）之后；一般放最后即可。
 
-**Fedora / RHEL（grub2）：**
-
-```bash
-# 查看当前默认内核行
-sudo grubby --info=ALL | grep -E 'kernel|args'
-# 追加 lsm 参数（grubby 会自动处理多内核条目）
-sudo grubby --update-kernel=ALL --args="lsm=lockdown,y,integrity,apparmor,bpf"
-sudo reboot
-```
-
 **Ubuntu / Debian（grub）：**
 
 ```bash
@@ -76,7 +66,6 @@ sudo reboot
 
 多数发行版的官方内核**默认不开** `CONFIG_BPF_LSM`。选择：
 
-- **Fedora**：`sudo dnf install kernel-edge` 或确认 `kernel-core` 的 config；Fedora 近年默认通常已开。
 - **Ubuntu**：主线 `linux-generic` 有时未开，可换 `linux-generic-hwe`；仍不行需自行编译。
 - **Arch**：官方 `linux` 内核通常已开 `CONFIG_BPF_LSM=y`，只需补引导参数。
 - **自编译**：在内核 config 里设 `CONFIG_BPF_LSM=y`（位于 `Security options → BPF LSM`），重编安装。
@@ -99,8 +88,7 @@ grep -w bpf /sys/kernel/security/lsm            # 含 bpf 才算已加载
 - **Ubuntu**：标准 `linux-generic` 内核历史上开 BPF LSM 的情况不稳定；`linux-generic-hwe`
   / `linux-generic-edge` 开启概率更高。很多 Ubuntu 实测达不到——这正是本项目提供降级方案
   （第 9 节）的原因。Ubuntu 通常**已开** `CONFIG_DEBUG_INFO_BTF`。
-- **Fedora / 较新 RHEL 系**：官方内核开 `CONFIG_BPF_LSM` 的概率较高。
-- **Arch**：官方 `linux` 内核通常已开 `CONFIG_BPF_LSM=y`，往往只需补引导参数。
+- **Arch**：官方 `linux` 内核对 BPF LSM 的支持通常较好；本项目目标场景为 Ubuntu/Debian，Arch 仅作参考。
 
 实测结果对应处理：
 
@@ -125,12 +113,6 @@ grep -w bpf /sys/kernel/security/lsm            # 含 bpf 才算已加载
 ### 2.1 官方源安装（推荐）
 
 ```bash
-# Fedora / RHEL / Rocky
-sudo rpm --import https://falco.org/repo/falcosecurity-packages.asc
-sudo curl -s -o /etc/yum.repos.d/falcosecurity.repo \
-  https://falco.org/repo/falcosecurity-rpm.repo
-sudo dnf install -y falco
-
 # Ubuntu / Debian
 sudo mkdir -p /etc/apt/keyrings
 curl -s https://falco.org/repo/falcosecurity-packages.asc | \
@@ -179,8 +161,7 @@ runuser -u "${SUDO_USER:-$USER}" -- /usr/local/go/bin/go mod download
 不装则 TSA 的 `posture`（静态基线）分恒为满分；装了才能按 Lynis 报告扣分。
 
 ```bash
-sudo dnf install -y lynis      # Fedora
-sudo apt-get install -y lynis  # Ubuntu
+sudo apt-get install -y lynis  # Ubuntu / Debian
 lynis show version
 ```
 
