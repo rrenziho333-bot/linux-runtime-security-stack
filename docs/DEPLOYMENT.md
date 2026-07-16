@@ -1,29 +1,32 @@
 # 部署与演示
 
-本文档针对当前实验主机，所有命令均可直接复制执行。
+本文档适用于任意已装好 Falco 与 Go 的 Linux 主机（内核是否有 BPF LSM 均可：
+有则完整运行，无则自动降级为纯检测，见下文及 INSTALL 第 9 节）。命令以项目根目录为当前路径。
 
 ## 1. 部署前确认
 
 ```bash
 /usr/local/go/bin/go version
 /usr/bin/falco --version
-grep -w bpf /sys/kernel/security/lsm
-test -f /home/zhaoren/ebpf/tsa/policy_config.yaml
+grep -w bpf /sys/kernel/security/lsm   # 输出含 bpf = 完整模式；不含 = 降级模式（两者都可部署）
+test -f ./tsa/policy_config.yaml
 ```
 
 要求：
 
 - Falco 已安装，并支持 modern eBPF；
-- 内核启用了 BPF LSM；
+- （完整模式才需要）内核启用了 BPF LSM；缺失时脚本自动降级，不阻断部署；
 - Go 1.23.10 工具链及项目依赖已经缓存；
-- TSA 源码位于 `/home/zhaoren/ebpf/tsa`。
+- TSA 源码位于项目根目录下的 `tsa/`。
 
 部署脚本使用 `GOPROXY=off`，不会在 root 构建阶段联网下载依赖。
+脚本会自动按 `SUDO_USER`（运行 sudo 的用户）和脚本所在目录渲染 systemd unit，
+无需手改任何路径。
 
 ## 2. 一键部署
 
 ```bash
-sudo /home/zhaoren/ebpf/deploy-security-stack.sh
+sudo ./deploy-security-stack.sh
 ```
 
 脚本依次执行：
@@ -32,27 +35,65 @@ sudo /home/zhaoren/ebpf/deploy-security-stack.sh
 2. 运行 Go 和 Python 测试；
 3. 校验 BPF 策略；
 4. 部署并校验 Falco 规则；
-5. 安装 BPF 控制器、策略、systemd 和 logrotate 配置；
-6. 启动四个服务；
+5. 探测内核 BPF LSM：有则安装 BPF 控制器、策略、systemd 和 logrotate 配置；无则跳过；
+6. 启动服务（完整模式四个，降级模式三个——Falco + TSA + 看板）；
 7. 删除维护标记。
+
+### 2.1 移植到新主机
+
+部署脚本不含任何硬编码用户名或绝对路径，移植步骤：
+
+1. 把仓库放在任意目录（如 `/opt/security-stack`），确保部署用户对其有读写权限；
+2. 确认该部署用户存在、有家目录、能 `sudo`（脚本以 `SUDO_USER` 作为运行态账户与构建账户）；
+3. 安装前置：Falco（modern eBPF）、Go 1.23、Lynis（可选）；内核 BPF LSM 可选（有则完整，无则自动降级，见 INSTALL）；
+4. `cd <仓库目录> && sudo ./deploy-security-stack.sh`。
+
+脚本会以 `SUDO_USER` 和脚本所在目录渲染 `systemd/*.service` 中的
+`__RUNTIME_USER__` / `__SRC_DIR__` 占位符，再装到 `/etc/systemd/system/`。
+渲染后会校验无占位符残留，残留则中断部署。
+
+### 2.2 运行与实时检测
+
+部署完成后，服务常驻由 systemd 管理。实时检测有三条观察通道：
+
+**触发一次检测（默认 audit 模式，不阻断）：**
+
+```bash
+echo "demo" | sudo tee -a /etc/tsa-protected-demo >/dev/null   # policy.yaml 默认保护该文件
+sleep 2
+sudo tail -n 3 /var/log/bpf-lsm/events.jsonl | jq   # BPF LSM 审计事件
+journalctl -u tsa-fusion -n 10 --no-pager           # TSA 评分日志
+```
+
+**实时看板（每 2 秒自动刷新）：**
+
+```text
+http://127.0.0.1:8766/
+```
+
+看板展示流水线状态、BPF 策略、风险评分与 Falco/BPF 证据链，只读、仅绑回环口。
+
+**持续跟随日志（实时）：**
+
+```bash
+journalctl -u bpf-lsm-controller -u tsa-fusion -u falco-modern-bpf -f   # -f 实时跟随（降级模式去掉 -u bpf-lsm-controller）
+tail -f /var/log/bpf-lsm/events.jsonl | jq                              # 仅完整模式存在此文件
+tail -f /var/log/falco/falco.json | jq
+```
 
 ## 3. 验证服务
 
 ```bash
-systemctl is-active \
-  falco-modern-bpf \
-  bpf-lsm-controller \
-  tsa-fusion \
-  tsa-dashboard
+# 检测流水线三项（完整与降级模式都应为 active）
+systemctl is-active falco-modern-bpf tsa-fusion tsa-dashboard
 
-systemctl is-enabled \
-  falco-modern-bpf \
-  bpf-lsm-controller \
-  tsa-fusion \
-  tsa-dashboard
+# 完整模式额外：BPF 控制器（降级模式此为 inactive/disabled，属正常，见 INSTALL 第 9 节）
+systemctl is-active bpf-lsm-controller
+systemctl is-enabled bpf-lsm-controller
 ```
 
-四项都应返回 `active` 和 `enabled`。
+- `falco-modern-bpf`、`tsa-fusion`、`tsa-dashboard` 应为 `active`/`enabled`；
+- `bpf-lsm-controller`：完整模式 `active`/`enabled`；降级模式 `inactive`/`disabled`（脚本未安装它）。
 
 查看启动日志：
 
@@ -62,10 +103,13 @@ journalctl -u bpf-lsm-controller -u tsa-fusion -u tsa-dashboard -n 30 --no-pager
 
 ## 4. 演示一次完整检测
 
+> 本节的“完整证据链”需**完整模式**（内核有 BPF LSM）。降级模式下没有 BPF 侧事件，
+> 只能验证 Falco 报警 + TSA 评分，可跳过下文带 `bpf-lsm` 字样的步骤。
+
 当前保护对象：
 
 ```text
-/etc/tmp_rzh
+/etc/tsa-protected-demo
 ```
 
 当前模式：
@@ -74,10 +118,10 @@ journalctl -u bpf-lsm-controller -u tsa-fusion -u tsa-dashboard -n 30 --no-pager
 AUDIT：记录并报警，但不阻止操作
 ```
 
-执行：
+执行（若文件不存在，部署脚本会自动创建；也可手动 `sudo install -m 0640 /dev/null /etc/tsa-protected-demo`）：
 
 ```bash
-echo "security-demo" | sudo tee -a /etc/tmp_rzh >/dev/null
+echo "security-demo" | sudo tee -a /etc/tsa-protected-demo >/dev/null
 sleep 2
 ```
 
@@ -104,7 +148,7 @@ http://127.0.0.1:8766/
 ```text
 tee 请求 write
 → Falco 匹配 Write below etc
-→ BPF LSM 命中 protect_tmp_rzh
+→ BPF LSM 命中 protect_demo_config
 → AUDIT，内核允许操作
 → TSA 接收并计算临时风险
 ```
@@ -114,14 +158,14 @@ tee 请求 write
 项目自定义 Falco 规则位于：
 
 ```text
-/home/zhaoren/ebpf/falco/rules.d/
+./falco/rules.d/
 ```
 
 修改后执行部署脚本。脚本会加载官方规则、自定义规则和例外进行完整校验，
 校验通过后才重启 Falco：
 
 ```bash
-sudo /home/zhaoren/ebpf/deploy-security-stack.sh
+sudo ./deploy-security-stack.sh
 ```
 
 Falco 负责报警，不承担阻断。
@@ -131,7 +175,7 @@ Falco 负责报警，不承担阻断。
 源策略：
 
 ```text
-/home/zhaoren/ebpf/policy.yaml
+./policy.yaml
 ```
 
 新增保护对象时，为每条策略提供唯一 ID、名称、模式和绝对路径：
@@ -152,7 +196,7 @@ Falco 负责报警，不承担阻断。
 重新部署：
 
 ```bash
-sudo /home/zhaoren/ebpf/deploy-security-stack.sh
+sudo ./deploy-security-stack.sh
 ```
 
 ## 7. 日志与数据位置
@@ -161,8 +205,8 @@ sudo /home/zhaoren/ebpf/deploy-security-stack.sh
 |---|---|
 | Falco JSON 事件 | `/var/log/falco/falco.json` |
 | BPF LSM JSONL 事件 | `/var/log/bpf-lsm/events.jsonl` |
-| TSA SQLite 状态 | `/home/zhaoren/ebpf/tsa/state/tsa.db` |
-| TSA 最新报告 | `/home/zhaoren/ebpf/tsa/reports/last_scan.json` |
+| TSA SQLite 状态 | `<项目根>/tsa/state/tsa.db` |
+| TSA 最新报告 | `<项目根>/tsa/reports/last_scan.json` |
 | 已部署 BPF 策略 | `/etc/bpf-lsm/policy.yaml` |
 
 ## 8. 常见故障
@@ -174,11 +218,11 @@ systemctl status tsa-dashboard --no-pager
 curl http://127.0.0.1:8766/healthz
 ```
 
-BPF 没有事件：
+BPF 没有事件（仅完整模式适用；降级模式本来就没有 bpf-lsm-controller）：
 
 ```bash
 systemctl status bpf-lsm-controller --no-pager
-sudo stat /etc/tmp_rzh
+sudo stat /etc/tsa-protected-demo
 sudo tail -n 20 /var/log/bpf-lsm/events.jsonl
 ```
 

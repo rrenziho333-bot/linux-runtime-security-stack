@@ -4,6 +4,10 @@
 
 > Falco 发现可疑行为，BPF LSM 对指定敏感对象审计或阻断，TSA 汇总事件并计算风险分，Lynis 提供系统基线分。
 
+> **在空白 Linux 上从零部署**（开 `CONFIG_BPF_LSM`、装 Falco/Go/Lynis、克隆部署）见
+> [docs/INSTALL.md](docs/INSTALL.md)。日常部署与实时检测见
+> [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)。
+
 ## 1. 一张图理解项目
 
 ```text
@@ -42,16 +46,16 @@ TSA 不是 Falco 插件，而是本项目实现的独立融合服务。Falco 和
 
 ## 3. 一次敏感操作会发生什么
 
-以写入 `/etc/tmp_rzh` 为例：
+以写入 `/etc/tsa-protected-demo` 为例（部署脚本会在缺失时自动创建该文件）：
 
 ```bash
-echo test | sudo tee -a /etc/tmp_rzh >/dev/null
+echo test | sudo tee -a /etc/tsa-protected-demo >/dev/null
 ```
 
 当前策略是 `audit`，因此：
 
 1. Falco 匹配文件写入规则并生成报警；
-2. BPF LSM 命中 `protect_tmp_rzh` 策略；
+2. BPF LSM 命中 `protect_demo_config` 策略；
 3. 内核记录审计事件，但允许写入；
 4. TSA 接收两类事件，执行去重、限速和临时风险扣分；
 5. 看板显示完整证据链。
@@ -61,7 +65,9 @@ echo test | sudo tee -a /etc/tmp_rzh >/dev/null
 ## 4. 当前实现
 
 - Falco 0.42.1，使用主机版 modern eBPF 驱动；
-- BPF LSM 覆盖写入、删除、重命名和属性修改；
+- 检测规则 = Falco 官方规则集（93 条，覆盖提权/容器逃逸/挖矿/反弹 shell 等）+
+  1 条自定义文件监控规则（`falco/rules.d/`）；官方规则快照已入库可读分析（`falco/official-rules/`）；
+  TSA 为其中 86 条官方规则配了扣分权重；
 - BPF 策略使用 YAML 配置，默认采用安全的 `audit` 模式；
 - TSA 使用 SQLite 持久化，支持去重、限速、风险过期和重启恢复；
 - Web 看板每 2 秒展示服务状态、策略、评分和事件证据链；
@@ -70,9 +76,18 @@ echo test | sudo tee -a /etc/tmp_rzh >/dev/null
 ## 5. 快速使用
 
 ```bash
-sudo /home/zhaoren/ebpf/deploy-security-stack.sh
+sudo ./deploy-security-stack.sh
 systemctl is-active falco-modern-bpf bpf-lsm-controller tsa-fusion tsa-dashboard
-```
+# 完整模式四项 active；降级模式 bpf-lsm-controller 为 inactive（属正常，详见文档）
+
+部署脚本会自动按当前 `SUDO_USER` 和脚本所在目录生成 systemd unit，无需手改路径。
+移植到新主机时把仓库放在任意目录、用部署用户执行 `sudo` 即可，详见
+[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)。
+
+脚本会**自动探测内核是否支持 BPF LSM**：支持则部署完整检测+阻断（四个服务全部 active）；
+不支持则自动降级为**纯检测模式**（跳过 `bpf-lsm-controller`，关闭 TSA 的 BPF 日志源，
+`is-active` 对应项会显示 inactive），Falco + TSA + 看板仍正常工作。降级细节见
+[docs/INSTALL.md](docs/INSTALL.md) 第 9 节。
 
 看板地址：
 
@@ -89,20 +104,24 @@ http://127.0.0.1:8766/
 ## 6. 核心代码
 
 ```text
-/home/zhaoren/ebpf
+<项目根目录>（部署脚本所在目录）
 ├── bpf/lsm_block_write.c       # 内核 BPF LSM 程序
 ├── main.go                     # BPF 加载、挂载和事件输出
 ├── policy.go                   # 策略校验及 BPF Map 写入
 ├── policy.yaml                 # 当前保护对象与 audit/enforce 模式
-├── falco/rules.d/              # 自定义 Falco 规则与例外
+├── falco/
+│   ├── rules.d/                # 自定义 Falco 规则与例外
+│   ├── official-rules/         # 官方规则快照（93 条，供分析阅读）
+│   └── fetch-official-rules.sh # 更新官方规则快照
 ├── tsa/
 │   ├── tsa_core.py             # 事件融合、去重、评分和持久化
 │   ├── tsa_fusion.py           # TSA 服务入口
 │   ├── tsa_dashboard.py        # 只读 Web 看板
 │   ├── policy_config.yaml      # TSA 评分策略
 │   └── tests/                  # Python 单元与集成测试
+├── docs/                       # INSTALL（从零安装）、DEPLOYMENT（部署演示）
 ├── deploy-security-stack.sh    # 测试、安装和启动入口
-└── systemd/                    # 服务定义
+└── systemd/                    # 服务定义（模板，部署时渲染）
 ```
 
 `lsmbpf_x86_bpfel.go/.o` 是 `bpf2go` 生成文件，`bpf-lsm-controller`
