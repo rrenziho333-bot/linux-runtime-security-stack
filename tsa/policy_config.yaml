@@ -52,7 +52,7 @@ baseline_lynis:
   # TSA 是否负责执行 lynis（需要 root）；否则就只读 report 文件
   run_lynis: false
   lynis_cmd: "lynis audit system --quick --quiet"
-  report_path: "/home/zhaoren/桌面/lynis-report.dat"
+  report_path: "reports/lynis-report.dat"
 
   # 评分策略：默认只扣 warnings（建议先这样，最稳）
   scoring_mode: "warnings_only"   # 可选: warnings_only | warnings_and_selected_suggestions

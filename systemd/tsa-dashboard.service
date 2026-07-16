@@ -1,15 +1,17 @@
+# Template unit: deploy-security-stack.sh renders __RUNTIME_USER__ and
+# __SRC_DIR__ at install time. Do not enable this file directly.
 [Unit]
 Description=Read-only TSA security pipeline dashboard
-Documentation=file:/home/zhaoren/ebpf/SECURITY_STACK.md
+Documentation=file:__SRC_DOCS__
 After=tsa-fusion.service bpf-lsm-controller.service falco-modern-bpf.service
 Wants=tsa-fusion.service
 
 [Service]
 Type=simple
-User=zhaoren
-Group=zhaoren
-WorkingDirectory=/home/zhaoren/ebpf/tsa
-ExecStart=/usr/bin/python3 /home/zhaoren/ebpf/tsa/tsa_dashboard.py --tsa-config /home/zhaoren/ebpf/tsa/policy_config.yaml --bpf-policy /etc/bpf-lsm/policy.yaml --bind 127.0.0.1 --port 8766
+User=__RUNTIME_USER__
+Group=__RUNTIME_USER__
+WorkingDirectory=__SRC_DIR__/tsa
+ExecStart=/usr/bin/python3 __SRC_DIR__/tsa/tsa_dashboard.py --tsa-config __SRC_DIR__/tsa/policy_config.yaml --bpf-policy /etc/bpf-lsm/policy.yaml --bind 127.0.0.1 --port 8766
 Restart=on-failure
 RestartSec=5
 UMask=0077

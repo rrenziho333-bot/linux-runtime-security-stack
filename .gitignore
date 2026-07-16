@@ -10,6 +10,16 @@ okfile.txt
 /lsm_block_write.bpf.o
 *.test
 
+# Rendered unit previews and local lynis reports
+/systemd/*.rendered
+/tsa/reports/*.dat
+
+# Falco official rules: a versioned snapshot is committed for offline analysis.
+# Re-fetch to match the installed falco version with falco/fetch-official-rules.sh.
+# Only ignore transient editor/backup files here, not the committed snapshot.
+/falco/official-rules/*.tmp
+/falco/official-rules/*~
+
 # Downloaded toolchain archives
 go*.linux-amd64.tar.gz
 

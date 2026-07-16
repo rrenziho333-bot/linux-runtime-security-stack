@@ -1,16 +1,18 @@
+# Template unit: deploy-security-stack.sh renders __RUNTIME_USER__ and
+# __SRC_DIR__ at install time. Do not enable this file directly.
 [Unit]
 Description=TSA Falco, BPF LSM, and Lynis risk fusion agent
-Documentation=file:/home/zhaoren/ebpf/SECURITY_STACK.md
+Documentation=file:__SRC_DOCS__
 After=falco-modern-bpf.service bpf-lsm-controller.service
 Wants=falco-modern-bpf.service
 
 [Service]
 Type=simple
-User=zhaoren
-Group=zhaoren
+User=__RUNTIME_USER__
+Group=__RUNTIME_USER__
 SupplementaryGroups=adm
-WorkingDirectory=/home/zhaoren/ebpf/tsa
-ExecStart=/usr/bin/python3 /home/zhaoren/ebpf/tsa/tsa_fusion.py --config /home/zhaoren/ebpf/tsa/policy_config.yaml
+WorkingDirectory=__SRC_DIR__/tsa
+ExecStart=/usr/bin/python3 __SRC_DIR__/tsa/tsa_fusion.py --config __SRC_DIR__/tsa/policy_config.yaml
 Restart=on-failure
 RestartSec=5
 TimeoutStopSec=15
@@ -19,7 +21,7 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=read-only
-ReadWritePaths=/home/zhaoren/ebpf/tsa/state /home/zhaoren/ebpf/tsa/reports
+ReadWritePaths=__SRC_DIR__/tsa/state __SRC_DIR__/tsa/reports
 ProtectKernelTunables=true
 ProtectControlGroups=true
 RestrictRealtime=true

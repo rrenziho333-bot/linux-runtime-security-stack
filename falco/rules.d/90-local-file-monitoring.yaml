@@ -1,8 +1,8 @@
 - rule: Monitor specific file access
-  desc: Detect when /etc/tmp_rzh is opened for reading or writing
+  desc: Detect when /etc/tsa-protected-demo is opened for reading or writing
   condition: >
     evt.type in (open, openat, openat2)
-    and fd.name = "/etc/tmp_rzh"
+    and fd.name = "/etc/tsa-protected-demo"
     and (evt.is_open_read = true or evt.is_open_write = true)
   output: >
     Sensitive file opened

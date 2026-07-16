@@ -1,6 +1,7 @@
+# Template unit: deploy-security-stack.sh renders __SRC_DOCS__ at install time.
 [Unit]
 Description=Map-driven BPF LSM policy controller
-Documentation=file:/home/zhaoren/ebpf/SECURITY_STACK.md
+Documentation=file:__SRC_DOCS__
 After=local-fs.target
 Before=tsa-fusion.service
 ConditionPathExists=/etc/bpf-lsm/policy.yaml

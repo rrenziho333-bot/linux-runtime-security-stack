@@ -8,7 +8,13 @@ fi
 
 ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 GO_BIN="/usr/local/go/bin/go"
-BUILD_USER="${SUDO_USER:-zhaoren}"
+if [[ -z ${SUDO_USER} ]]; then
+  echo "Could not determine the runtime user: SUDO_USER is unset." >&2
+  echo "Run this script with: sudo ${0}" >&2
+  exit 1
+fi
+BUILD_USER="${SUDO_USER}"
+RUNTIME_USER="${SUDO_USER}"
 BUILD_HOME="$(getent passwd "${BUILD_USER}" | cut -d: -f6)"
 BUILD_OUTPUT="${ROOT_DIR}/bpf-lsm-controller"
 TSA_DIR="${ROOT_DIR}/tsa"
@@ -46,37 +52,100 @@ run_as_builder() {
     "$@"
 }
 
+# Render a template systemd unit (with __RUNTIME_USER__ / __SRC_DIR__ /
+# __SRC_DOCS__ placeholders) into a temporary file using the actual runtime
+# user and project directory. The caller installs the returned temporary file.
+render_unit() {
+  local source_unit="$1"
+  local rendered
+  rendered="$(mktemp)"
+  sed \
+    -e "s#__RUNTIME_USER__#${RUNTIME_USER}#g" \
+    -e "s#__SRC_DIR__#${ROOT_DIR}#g" \
+    -e "s#__SRC_DOCS__#${ROOT_DIR}/SECURITY_STACK.md#g" \
+    "${source_unit}" >"${rendered}"
+  if grep -q '__[A-Z_]*__' "${rendered}"; then
+    rm -f "${rendered}"
+    echo "Rendering ${source_unit} left unresolved placeholders." >&2
+    exit 1
+  fi
+  printf '%s' "${rendered}"
+}
+
+# Detect whether the running kernel supports BPF LSM. Falco's modern eBPF
+# driver (tracepoint/kprobe) does NOT require BPF LSM and still works when this
+# returns false; only bpf-lsm-controller's kernel-level enforcement needs it.
+bpf_lsm_available() {
+  [[ -r /sys/kernel/security/lsm ]] || return 1
+  grep -qw bpf /sys/kernel/security/lsm || return 1
+  return 0
+}
+
+if bpf_lsm_available; then
+  BPF_LSM_AVAILABLE=1
+else
+  BPF_LSM_AVAILABLE=0
+fi
+
 cd "${ROOT_DIR}"
 run_as_builder "${GO_BIN}" version
 run_as_builder "${GO_BIN}" test ./...
 run_as_builder "${GO_BIN}" build -o "${BUILD_OUTPUT}" .
+
+# Ensure the demo protected object exists on fresh machines. The controller
+# stats each policy path at startup; a missing file would abort -check.
+DEMO_FILE="/etc/tsa-protected-demo"
+if [[ ! -e ${DEMO_FILE} ]]; then
+  install -o root -g root -m 0640 /dev/null "${DEMO_FILE}"
+  echo "Created demo protected file ${DEMO_FILE}."
+fi
+
 run_as_builder "${BUILD_OUTPUT}" -check -config "${ROOT_DIR}/policy.yaml"
 runuser -u "${BUILD_USER}" -- sh -c \
   "cd '${TSA_DIR}' && python3 -m unittest discover -s tests -v"
 
 "${ROOT_DIR}/falco/deploy-host-falco.sh"
 
-install -D -o root -g root -m 0755 \
-  "${BUILD_OUTPUT}" /usr/local/sbin/bpf-lsm-controller
-install -D -o root -g root -m 0644 \
-  "${ROOT_DIR}/policy.yaml" /etc/bpf-lsm/policy.yaml
-install -D -o root -g root -m 0644 \
-  "${ROOT_DIR}/systemd/bpf-lsm-controller.service" \
-  /etc/systemd/system/bpf-lsm-controller.service
-install -D -o root -g root -m 0644 \
-  "${ROOT_DIR}/systemd/tsa-fusion.service" \
-  /etc/systemd/system/tsa-fusion.service
-install -D -o root -g root -m 0644 \
-  "${ROOT_DIR}/systemd/tsa-dashboard.service" \
-  /etc/systemd/system/tsa-dashboard.service
-install -D -o root -g root -m 0644 \
-  "${ROOT_DIR}/logrotate/bpf-lsm" /etc/logrotate.d/bpf-lsm
 install -D -o root -g root -m 0644 \
   "${ROOT_DIR}/logrotate/falco-json" /etc/logrotate.d/falco-json
 
-install -d -o root -g adm -m 0750 /var/log/bpf-lsm
 install -d -o "${BUILD_USER}" -g "${BUILD_USER}" -m 0750 "${TSA_DIR}/state"
 install -d -o "${BUILD_USER}" -g "${BUILD_USER}" -m 0750 "${TSA_DIR}/reports"
+
+if [[ ${BPF_LSM_AVAILABLE} -eq 1 ]]; then
+  install -D -o root -g root -m 0755 \
+    "${BUILD_OUTPUT}" /usr/local/sbin/bpf-lsm-controller
+  install -D -o root -g root -m 0644 \
+    "${ROOT_DIR}/policy.yaml" /etc/bpf-lsm/policy.yaml
+  rendered_bpf_controller="$(render_unit "${ROOT_DIR}/systemd/bpf-lsm-controller.service")"
+  install -D -o root -g root -m 0644 \
+    "${rendered_bpf_controller}" /etc/systemd/system/bpf-lsm-controller.service
+  rm -f "${rendered_bpf_controller}"
+  install -D -o root -g root -m 0644 \
+    "${ROOT_DIR}/logrotate/bpf-lsm" /etc/logrotate.d/bpf-lsm
+  install -d -o root -g adm -m 0750 /var/log/bpf-lsm
+else
+  # Degraded mode: kernel has no BPF LSM. Keep the controller from being
+  # installed/enabled, and tell TSA not to watch the (non-existent) BPF event
+  # log so the fusion pipeline runs on Falco only.
+  echo "BPF LSM not available on this kernel — deploying in detection-only mode."
+  echo "  (bpf-lsm-controller is skipped; Falco + TSA + dashboard remain active.)"
+  if grep -q '^bpf_lsm:' "${TSA_DIR}/policy_config.yaml"; then
+    awk 'prev=="bpf_lsm:" && $0~/^[[:space:]]*enabled: true[[:space:]]*$/ \
+           {$0="  enabled: false"} {prev=$1; print}' \
+      "${TSA_DIR}/policy_config.yaml" > "${TSA_DIR}/policy_config.yaml.tmp" \
+      && mv "${TSA_DIR}/policy_config.yaml.tmp" "${TSA_DIR}/policy_config.yaml"
+  fi
+fi
+
+rendered_tsa_fusion="$(render_unit "${ROOT_DIR}/systemd/tsa-fusion.service")"
+install -D -o root -g root -m 0644 \
+  "${rendered_tsa_fusion}" /etc/systemd/system/tsa-fusion.service
+rm -f "${rendered_tsa_fusion}"
+rendered_tsa_dashboard="$(render_unit "${ROOT_DIR}/systemd/tsa-dashboard.service")"
+install -D -o root -g root -m 0644 \
+  "${rendered_tsa_dashboard}" /etc/systemd/system/tsa-dashboard.service
+rm -f "${rendered_tsa_dashboard}"
 
 # Stop a temporary foreground dashboard used during development so the
 # managed service can bind its loopback port cleanly.
@@ -84,17 +153,25 @@ pkill -u "${BUILD_USER}" -f \
   "^python3 ${TSA_DIR}/tsa_dashboard.py .*--port 8766$" || true
 
 systemctl daemon-reload
-systemctl enable bpf-lsm-controller.service
+if [[ ${BPF_LSM_AVAILABLE} -eq 1 ]]; then
+  systemctl enable bpf-lsm-controller.service
+  systemctl restart bpf-lsm-controller.service
+fi
 systemctl enable tsa-fusion.service
 systemctl enable tsa-dashboard.service
-systemctl restart bpf-lsm-controller.service
 systemctl restart tsa-fusion.service
 systemctl restart tsa-dashboard.service
 
-systemctl --no-pager --full status bpf-lsm-controller.service
+if [[ ${BPF_LSM_AVAILABLE} -eq 1 ]]; then
+  systemctl --no-pager --full status bpf-lsm-controller.service
+fi
 systemctl --no-pager --full status tsa-fusion.service
 systemctl --no-pager --full status tsa-dashboard.service
 
 echo
-echo "Security stack deployed. BPF LSM policy mode remains AUDIT."
+if [[ ${BPF_LSM_AVAILABLE} -eq 1 ]]; then
+  echo "Security stack deployed. BPF LSM policy mode remains AUDIT."
+else
+  echo "Security stack deployed in DETECTION-ONLY mode (no BPF LSM enforcement)."
+fi
 echo "Dashboard: http://127.0.0.1:8766/"
