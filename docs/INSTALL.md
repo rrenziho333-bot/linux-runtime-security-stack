@@ -205,22 +205,77 @@ sudo ./deploy-security-stack.sh
 
 ## 6. 验证
 
+部署成功的判据分四步：服务存活 → 触发检测 → 三组件各自确认 → 看板端到端。
+
+### 6.1 服务存活（基础门槛）
+
 ```bash
+# 检测流水线三项（完整与降级模式都应为 active）
 systemctl is-active falco-modern-bpf tsa-fusion tsa-dashboard
-# 以上三项均 active 即检测流水线正常运行（完整模式另见下行的 bpf-lsm-controller）
+# 期望输出三行 active
 
-# 完整模式（内核有 BPF LSM）额外确认：
-systemctl is-active bpf-lsm-controller   # active = 完整；inactive = 已降级为纯检测（见第 9 节，非故障）
-
-# 触发一次当前 audit 模式的检测
-echo "demo" | sudo tee -a /etc/tsa-protected-demo >/dev/null
-sleep 2
-sudo tail -n 3 /var/log/bpf-lsm/events.jsonl | jq     # 完整模式应有 BPF 审计事件；降级模式无此文件
-journalctl -u tsa-fusion -n 10 --no-pager             # 应有评分日志
-curl -s http://127.0.0.1:8766/healthz                 # {"status":"ok"}
+# 完整模式额外（内核有 BPF LSM）：
+systemctl is-active bpf-lsm-controller
+# active = 完整检测+阻断；inactive = 已降级为纯检测（见第 9 节，非故障）
 ```
 
-实时监测、看板、持续盯日志的命令见 [DEPLOYMENT.md](DEPLOYMENT.md) 第 2.2 节。
+**成功判据①**：`falco-modern-bpf`、`tsa-fusion`、`tsa-dashboard` 三项必须 `active`。
+完整模式另要求 `bpf-lsm-controller` 为 `active`（降级模式为 `inactive` 属正常）。
+
+### 6.2 触发一次检测（audit 模式，不阻断）
+
+```bash
+echo "demo" | sudo tee -a /etc/tsa-protected-demo >/dev/null
+sleep 2
+```
+
+### 6.3 三组件分别确认各自检测生效
+
+**Falco 侧（广域检测，必有）：**
+
+```bash
+sudo tail -n 5 /var/log/falco/falco.json | jq
+# 期望：能看到针对 /etc/tsa-protected-demo 的报警，规则名通常是自定义的
+#       "Monitor specific file access" 或官方的 "Write below etc"
+```
+
+**BPF LSM 侧（内核级决策，仅完整模式）：**
+
+```bash
+sudo tail -n 3 /var/log/bpf-lsm/events.jsonl | jq
+# 期望：含 policy_name=protect_demo_config、operation=write、action=audit 的事件
+# 降级模式没有此文件（bpf-lsm-controller 本就未启动，不是故障，见第 9 节）
+```
+
+**TSA 侧（融合评分，必有）：**
+
+```bash
+journalctl -u tsa-fusion -n 10 --no-pager
+# 期望：出现 Falco rule=... status=scored points=-N runtime=NN 的日志，
+#       表明事件已被 TSA 接收并计入风险评分
+curl -s http://127.0.0.1:8766/healthz
+# 期望：{"status":"ok"}
+```
+
+### 6.4 看板端到端确认
+
+浏览器打开 `http://127.0.0.1:8766/`，确认：
+
+- 顶部"组件流水线"中 Falco / BPF LSM / TSA 三项显示 `active`（绿色）；
+- "风险评分"区有数值（posture/runtime/final）；
+- "最近操作与证据链"出现刚才 `tee` 写 `/etc/tsa-protected-demo` 的事件——
+  完整模式为 Falco↔BPF 双侧证据链，降级模式为仅 Falco 侧证据。
+
+### 6.5 一句话成功判据
+
+满足以下全部即运行成功：
+
+- ✅ `falco-modern-bpf` / `tsa-fusion` / `tsa-dashboard` 三服务 `active`；
+- ✅ 写 `/etc/tsa-protected-demo` 后：Falco 日志有报警、TSA 日志有 `scored` 评分、看板"证据链"出现该事件；
+- ✅（完整模式）`bpf-lsm-controller` `active` 且 `/var/log/bpf-lsm/events.jsonl` 有 `action=audit` 事件；
+- ✅（降级模式）BPF 两项可缺省，Falco + TSA + 看板三件成立即算纯检测成功。
+
+实时持续监测、盯日志命令见 [DEPLOYMENT.md](DEPLOYMENT.md) 第 2.2 节。
 
 ## 7. 关于 Falco 规则数量
 
