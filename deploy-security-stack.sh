@@ -68,6 +68,24 @@ render_unit() {
   printf '%s' "${rendered}"
 }
 
+# Open the dashboard port (8766) so other hosts can reach the score API and
+# dashboard. Best-effort: silently no-op if neither firewalld nor ufw is present.
+DASHBOARD_PORT=8766
+open_dashboard_port() {
+  if systemctl is-active --quiet firewalld 2>/dev/null; then
+    firewall-cmd --add-port="${DASHBOARD_PORT}/tcp" --permanent >/dev/null 2>&1 \
+      && firewall-cmd --reload >/dev/null 2>&1 \
+      && echo "Opened ${DASHBOARD_PORT}/tcp in firewalld."
+    return
+  fi
+  if command -v ufw >/dev/null 2>&1 && ufw status >/dev/null 2>&1; then
+    ufw allow "${DASHBOARD_PORT}/tcp" >/dev/null 2>&1 \
+      && echo "Opened ${DASHBOARD_PORT}/tcp in ufw."
+    return
+  fi
+  echo "No firewalld/ufw detected; ensure ${DASHBOARD_PORT}/tcp is reachable manually if needed."
+}
+
 # Detect whether the running kernel supports BPF LSM. Falco's modern eBPF
 # driver (tracepoint/kprobe) does NOT require BPF LSM and still works when this
 # returns false; only bpf-lsm-controller's kernel-level enforcement needs it.
@@ -160,6 +178,8 @@ pkill -u "${BUILD_USER}" -f \
   "^python3 ${TSA_DIR}/tsa_dashboard.py .*--port 8766$" || true
 
 systemctl daemon-reload
+# Let other hosts reach the dashboard / score API (binds 0.0.0.0:8766).
+open_dashboard_port
 if [[ ${BPF_LSM_AVAILABLE} -eq 1 ]]; then
   systemctl enable bpf-lsm-controller.service
   systemctl restart bpf-lsm-controller.service
@@ -181,4 +201,5 @@ if [[ ${BPF_LSM_AVAILABLE} -eq 1 ]]; then
 else
   echo "Security stack deployed in DETECTION-ONLY mode (no BPF LSM enforcement)."
 fi
-echo "Dashboard: http://127.0.0.1:8766/"
+echo "Dashboard: http://127.0.0.1:8766/  (other hosts: http://<this-host-ip>:8766/)"
+echo "Risk score API:  GET http://<this-host-ip>:8766/systemManage/risk/score"
