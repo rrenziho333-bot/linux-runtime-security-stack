@@ -92,8 +92,25 @@ systemctl is-active falco-modern-bpf bpf-lsm-controller tsa-fusion tsa-dashboard
 看板地址：
 
 ```text
-http://127.0.0.1:8766/
+http://127.0.0.1:8766/   （别的主机用 http://<监测机IP>:8766/）
 ```
+
+服务绑 `0.0.0.0:8766`，**可被别的主机访问**（部署脚本自动放行防火墙 8766 端口）。
+
+### 对外接口：查询实时风险分值
+
+外部系统（如零信任管理系统）可用 HTTP GET 程序化查询监测主机的实时风险分值，
+响应遵循《零信任管理系统接口文档》统一信封 `{code, status, message, data}`：
+
+```bash
+# 别的主机查询监测机实时分值
+curl http://<监测机IP>:8766/systemManage/risk/score
+# → {"code":20000,"status":true,"message":"操作成功",
+#    "data":{"final":100.0,"posture":100.0,"runtime":100.0,"generated_time":"..."}}
+```
+
+`final` 为最终风险分（满分 100，越低越危险）。接口验证与他机访问排查见
+[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) 第 9 节。
 
 完整部署与验证步骤见 [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)。
 

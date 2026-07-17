@@ -239,3 +239,78 @@ sudo falco -V /etc/falco/falco_rules.yaml \
 sudo falco --dry-run
 journalctl -u falco-modern-bpf -n 30 --no-pager
 ```
+
+## 9. 对外接口：查询实时风险分值
+
+看板服务（`tsa-dashboard`，绑 `0.0.0.0:8766`）对外暴露一个只读 HTTP 接口，
+遵循《零信任管理系统接口文档》地面系统 HTTP 接口规范的统一响应信封
+`{code, status, message, data}`。外部系统（如零信任管理系统）可用它程序化查询
+监测主机的实时风险分值。
+
+### 9.1 接口规格
+
+| 项 | 值 |
+|---|---|
+| 协议 | HTTP |
+| 方法 | GET |
+| 路径 | `/systemManage/risk/score` |
+| 端口 | 8766 |
+| 本机访问 | `http://127.0.0.1:8766/systemManage/risk/score` |
+| 他机访问 | `http://<监测机IP>:8766/systemManage/risk/score` |
+| 认证 | 暂无（内网/可信环境；对外暴露建议后续加 token） |
+
+### 9.2 验证接口（本机）
+
+```bash
+curl -s http://127.0.0.1:8766/systemManage/risk/score | jq
+```
+
+预期返回（成功）：
+
+```json
+{
+  "code": 20000,
+  "status": true,
+  "message": "操作成功",
+  "data": {
+    "final": 100.0,
+    "posture": 100.0,
+    "runtime": 100.0,
+    "generated_time": "2026-07-17T04:47:19.988646+00:00"
+  }
+}
+```
+
+- `final`：最终风险分（`posture×0.4 + runtime×0.6`），满分 100，越低越危险。
+- `posture`：Lynis 静态基线分。
+- `runtime`：运行时分（来自 Falco/BPF 实时事件，随风险过期自动回升）。
+
+失败时返回 `code=50000, status=false`（如 TSA 状态库未就绪），属信封规范内的错误响应。
+
+### 9.3 验证接口（别的主机访问）
+
+前提：监测机已部署、防火墙已放行 8766（部署脚本自动放行；云主机还需在云控制台安全组放行）。
+
+在**另一台主机**上执行：
+
+```bash
+# 把 <监测机IP> 换成监测主机的实际 IP
+curl -s http://<监测机IP>:8766/systemManage/risk/score | jq
+```
+
+能拿到上面的统一信封分值，即说明他机可访问监测主机的实时分数。
+
+也可用浏览器打开 `http://<监测机IP>:8766/` 看网页看板。
+
+### 9.4 他机访问不通的排查
+
+```bash
+# 监测机上确认服务在监听 0.0.0.0:8766
+ss -ltnp | grep 8766          # 应见 0.0.0.0:8766 或 *:8766
+# 监测机上确认防火墙已放行（CentOS）
+sudo firewall-cmd --list-ports | grep 8766
+# 监测机上确认防火墙已放行（Ubuntu）
+sudo ufw status | grep 8766
+```
+
+若都正常仍不通：监测机若是云主机，检查云平台**安全组**是否放行 8766 入站（系统防火墙之外的层）。
