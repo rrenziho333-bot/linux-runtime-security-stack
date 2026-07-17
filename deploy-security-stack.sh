@@ -21,10 +21,6 @@ TSA_DIR="${ROOT_DIR}/tsa"
 MAINTENANCE_DIR="/run/tsa-fusion"
 MAINTENANCE_FILE="${MAINTENANCE_DIR}/maintenance"
 
-if [[ ! -x ${GO_BIN} ]]; then
-  echo "Required Go toolchain is missing: ${GO_BIN}" >&2
-  exit 1
-fi
 if [[ -z ${BUILD_HOME} || ! -d ${BUILD_HOME} ]]; then
   echo "Cannot determine home directory for build user ${BUILD_USER}." >&2
   exit 1
@@ -88,19 +84,30 @@ else
 fi
 
 cd "${ROOT_DIR}"
-run_as_builder "${GO_BIN}" version
-run_as_builder "${GO_BIN}" test ./...
-run_as_builder "${GO_BIN}" build -o "${BUILD_OUTPUT}" .
 
-# Ensure the demo protected object exists on fresh machines. The controller
-# stats each policy path at startup; a missing file would abort -check.
+# Ensure the demo protected object exists on fresh machines. In full mode the
+# controller stats each policy path at startup (missing file aborts -check);
+# create it up front either way so a later switch to full mode needs no prep.
 DEMO_FILE="/etc/tsa-protected-demo"
 if [[ ! -e ${DEMO_FILE} ]]; then
   install -o root -g root -m 0640 /dev/null "${DEMO_FILE}"
   echo "Created demo protected file ${DEMO_FILE}."
 fi
 
-run_as_builder "${BUILD_OUTPUT}" -check -config "${ROOT_DIR}/policy.yaml"
+if [[ ${BPF_LSM_AVAILABLE} -eq 1 ]]; then
+  # Full mode: Go toolchain is required to build the bpf-lsm-controller binary.
+  if [[ ! -x ${GO_BIN} ]]; then
+    echo "Full mode needs the Go toolchain at ${GO_BIN} (install Go 1.23, see docs/INSTALL.md §3)." >&2
+    exit 1
+  fi
+  run_as_builder "${GO_BIN}" test ./...
+  run_as_builder "${GO_BIN}" build -o "${BUILD_OUTPUT}" .
+  run_as_builder "${BUILD_OUTPUT}" -check -config "${ROOT_DIR}/policy.yaml"
+else
+  echo "Detection-only mode: skipping Go build and BPF controller (no Go needed)."
+fi
+
+# TSA is Python only; its tests run in both modes.
 runuser -u "${BUILD_USER}" -- sh -c \
   "cd '${TSA_DIR}' && python3 -m unittest discover -s tests -v"
 
