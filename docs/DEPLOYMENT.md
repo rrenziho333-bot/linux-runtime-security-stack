@@ -1,7 +1,10 @@
 # 部署与演示
 
-本文档适用于任意已装好 Falco 与 Go 的 Linux 主机（内核是否有 BPF LSM 均可：
-有则完整运行，无则自动降级为纯检测，见下文及 INSTALL 第 9 节）。命令以项目根目录为当前路径。
+> **首次部署/新手请先看 [INSTALL.md](INSTALL.md)。** 本文档假设 Falco 与 Go 等前置已装好；
+> 若你是从一台空白机器开始，先按 INSTALL 从零装好前置，再回到本文档部署。
+>
+> 本文档适用于已装好前置的 Linux 主机（内核是否有 BPF LSM 均可：有则完整运行，
+> 无则自动降级为纯检测，见 INSTALL 第 9 节）。命令以项目根目录为当前路径。
 
 ## 1. 部署前确认
 
@@ -32,10 +35,10 @@ sudo ./deploy-security-stack.sh
 脚本依次执行：
 
 1. 创建 TSA 维护标记，避免部署行为污染评分；
-2. 运行 Go 和 Python 测试；
-3. 校验 BPF 策略；
-4. 部署并校验 Falco 规则；
-5. 探测内核 BPF LSM：有则安装 BPF 控制器、策略、systemd 和 logrotate 配置；无则跳过；
+2. 创建演示文件 `/etc/tsa-protected-demo`（如不存在）；
+3. 部署并校验 Falco 规则；
+4. 探测内核 BPF LSM：完整模式则跑 Go 测试、编译并校验 BPF 策略、装 BPF 控制器；降级模式跳过 Go 编译；
+5. 跑 Python 测试；
 6. 启动服务（完整模式四个，降级模式三个——Falco + TSA + 看板）；
 7. 删除维护标记。
 
@@ -61,9 +64,12 @@ sudo ./deploy-security-stack.sh
 ```bash
 echo "demo" | sudo tee -a /etc/tsa-protected-demo >/dev/null   # policy.yaml 默认保护该文件
 sleep 2
-sudo tail -n 3 /var/log/bpf-lsm/events.jsonl | jq   # BPF LSM 审计事件
-journalctl -u tsa-fusion -n 10 --no-pager           # TSA 评分日志
+sudo tail -n 3 /var/log/bpf-lsm/events.jsonl | jq   # BPF LSM 审计事件（仅完整模式有此文件）
+journalctl -u tsa-fusion -n 10 --no-pager           # TSA 评分日志（两种模式都有）
 ```
+
+> **降级模式**（无 BPF LSM）：`/var/log/bpf-lsm/events.jsonl` 不存在属正常，跳过那条 tail；
+> 看 Falco 报警用 `sudo tail -n 5 /var/log/falco/falco.json | jq`，TSA 评分日志照常查看。
 
 **实时看板（每 2 秒自动刷新）：**
 
@@ -73,7 +79,8 @@ http://127.0.0.1:8766/
 
 看板展示流水线状态、BPF 策略、风险评分与 Falco/BPF 证据链，只读。
 服务绑定 `0.0.0.0:8766`，**可被别的主机访问**（本机用 `http://127.0.0.1:8766/`，
-别的主机用 `http://<监测机IP>:8766/`）；需在监测机防火墙放行 8766 端口。
+别的主机用 `http://<监测机IP>:8766/`，监测机 IP 用 `ip a` 或 `hostname -I` 查）；
+部署脚本会自动放行监测机防火墙 8766 端口。
 公开接口 `GET /systemManage/risk/score` 供外部系统程序化查询实时风险分值（统一响应信封）。
 
 **持续跟随日志（实时）：**

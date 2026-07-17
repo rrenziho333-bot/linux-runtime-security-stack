@@ -4,9 +4,8 @@
 
 > Falco 发现可疑行为，BPF LSM 对指定敏感对象审计或阻断，TSA 汇总事件并计算风险分，Lynis 提供系统基线分。
 
-> **在空白 Linux 上从零部署**（开 `CONFIG_BPF_LSM`、装 Falco/Go/Lynis、克隆部署）见
-> [docs/INSTALL.md](docs/INSTALL.md)。日常部署与实时检测见
-> [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)。
+> 📌 **新手/首次部署由此开始**：[docs/INSTALL.md](docs/INSTALL.md)（从空白 Linux 装前置 → 部署 → 验证）。
+> 已装好前置、只需部署与实时检测，见 [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)。
 
 ## 1. 一张图理解项目
 
@@ -75,6 +74,9 @@ echo test | sudo tee -a /etc/tsa-protected-demo >/dev/null
 
 ## 5. 快速使用
 
+> **前置必读**：跑下面的部署脚本前，必须先 clone 本仓库、并装好 Falco（modern eBPF）和 Go 1.23。
+> 若你从一台空白机器开始，先照 [docs/INSTALL.md](docs/INSTALL.md) 从零装前置，否则部署会失败。
+
 ```bash
 sudo ./deploy-security-stack.sh
 systemctl is-active falco-modern-bpf bpf-lsm-controller tsa-fusion tsa-dashboard
@@ -89,11 +91,19 @@ systemctl is-active falco-modern-bpf bpf-lsm-controller tsa-fusion tsa-dashboard
 `is-active` 对应项会显示 inactive），Falco + TSA + 看板仍正常工作。降级细节见
 [docs/INSTALL.md](docs/INSTALL.md) 第 9 节。
 
+判断自己处于哪种模式：
+
+```bash
+grep -w bpf /sys/kernel/security/lsm   # 输出含 bpf = 完整模式；无输出 = 降级模式
+```
+
 看板地址：
 
 ```text
 http://127.0.0.1:8766/   （别的主机用 http://<监测机IP>:8766/）
 ```
+
+> 不知道监测机 IP？在监测机上执行 `ip a` 或 `hostname -I` 查看，取局域网地址填入 `<监测机IP>`。
 
 服务绑 `0.0.0.0:8766`，**可被别的主机访问**（部署脚本自动放行防火墙 8766 端口）。
 
