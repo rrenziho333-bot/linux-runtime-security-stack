@@ -353,6 +353,12 @@ class DashboardData:
             incident.pop("_timestamp", None)
         return incidents[:30]
 
+    def scores(self) -> Dict[str, float]:
+        """Return only the current risk scores (lighter than snapshot())."""
+        with self._connect() as db:
+            state = self._state(db)
+            return self._scores(db, state)
+
     def snapshot(self) -> Dict[str, Any]:
         with self._connect() as db:
             state = self._state(db)
@@ -438,6 +444,40 @@ class DashboardHandler(BaseHTTPRequestHandler):
             except (OSError, sqlite3.Error, ValueError) as error:
                 body = json.dumps(
                     {"error": str(error)}, ensure_ascii=False
+                ).encode("utf-8")
+                self._send(
+                    body,
+                    "application/json; charset=utf-8",
+                    HTTPStatus.SERVICE_UNAVAILABLE,
+                )
+            return
+        if path == "/systemManage/risk/score":
+            # Zero-trust management API: GET current risk scores.
+            # Unified response envelope per 《零信任管理系统接口文档》.
+            try:
+                data = self.server.data.scores()  # type: ignore[attr-defined]
+                envelope = {
+                    "code": 20000,
+                    "status": True,
+                    "message": "操作成功",
+                    "data": {
+                        "final": data["final"],
+                        "posture": data["posture"],
+                        "runtime": data["runtime"],
+                        "generated_time": utc_now(),
+                    },
+                }
+                body = json.dumps(envelope, ensure_ascii=False).encode("utf-8")
+                self._send(body, "application/json; charset=utf-8")
+            except (OSError, sqlite3.Error, ValueError) as error:
+                body = json.dumps(
+                    {
+                        "code": 50000,
+                        "status": False,
+                        "message": f"查询失败: {error}",
+                        "data": None,
+                    },
+                    ensure_ascii=False,
                 ).encode("utf-8")
                 self._send(
                     body,
