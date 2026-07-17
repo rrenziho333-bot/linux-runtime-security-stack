@@ -7,6 +7,14 @@
 > 📌 **新手/首次部署由此开始**：[docs/INSTALL.md](docs/INSTALL.md)（从空白 Linux 装前置 → 部署 → 验证）。
 > 已装好前置、只需部署与实时检测，见 [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)。
 
+## 30 秒速览
+
+- **干什么的**：在 Linux 主机上做运行时安全检测——Falco 按规则报警广域可疑行为，BPF LSM 在内核对受保护文件做审计或阻断，TSA 融合事件算风险分，Lynis 给基线分。
+- **怎么跑**：装好 Falco + Go 前置 → `sudo ./deploy-security-stack.sh` 一键部署 → 脚本自动探测内核，有 BPF LSM 则完整（检测+阻断），无则自动降级（纯检测）。
+- **怎么验**：`systemctl is-active` 看服务 → 写 `/etc/tsa-protected-demo` 触发检测 → 看板 `http://127.0.0.1:8766/` 看证据。
+- **怎么对接**：外部系统 `GET http://<监测机IP>:8766/systemManage/risk/score` 拿实时风险分值（统一响应信封）。
+- **跑不起来先看**：前置装了吗（INSTALL §2、§3）？内核够新吗（CentOS 7 不行，需 8/Stream 9+）？
+
 ## 1. 一张图理解项目
 
 ```text

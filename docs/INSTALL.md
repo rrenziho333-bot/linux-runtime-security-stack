@@ -94,6 +94,14 @@ sudo grub2-mkconfig -o /boot/efi/EFI/centos/grub.cfg     # EFI 启动
 sudo reboot
 ```
 
+> **CentOS EFI 用户：确认 grub.cfg 实际路径。** 上面写的是常见路径 `/boot/efi/EFI/centos/grub.cfg`，
+> 但不同安装方式目录名可能不同（`centos` / `centos-stream` / `rhel` 等）。先查实际目录：
+> ```bash
+> ls /boot/efi/EFI/
+> ```
+> 找到里面的 `<目录名>/grub.cfg`，把命令里的 `centos` 换成实际目录名即可。
+> Ubuntu EFI 同理，目录名一般是 `ubuntu`，若不是用 `ls /boot/efi/EFI/` 确认。
+
 重启后再次 `grep -w bpf /sys/kernel/security/lsm`，输出列表里含 `bpf` 即成功。
 
 ### 1.3 没编译支持：换内核或自编译（可选，代价较高）
