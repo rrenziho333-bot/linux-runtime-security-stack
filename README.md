@@ -5,6 +5,7 @@
 > Falco 发现可疑行为，BPF LSM 对指定敏感对象审计或阻断，TSA 汇总事件并计算风险分，Lynis 提供系统基线分。
 
 > 📌 **新手/首次部署由此开始**：[docs/INSTALL.md](docs/INSTALL.md)（从空白 Linux 装前置 → 部署 → 验证）。
+> ⚡ **想最快跑通（5 步，从 clone 到别人 curl 拿分）**：[docs/QUICKSTART.md](docs/QUICKSTART.md)。
 > 已装好前置、只需部署与实时检测，见 [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)。
 
 ## 30 秒速览
