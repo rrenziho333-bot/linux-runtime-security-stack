@@ -3,7 +3,8 @@
 从一台空白 Linux 到"**别人 curl 拿到这台机器的风险分数**"，5 步。每步附期望输出，照着对答案。
 
 > 这是最短路径。详细原理、降级说明、排障见 [INSTALL.md](INSTALL.md) 与 [DEPLOYMENT.md](DEPLOYMENT.md)。
-> 支持发行版：Ubuntu/Debian、CentOS 8/Stream 9+。
+> 支持发行版：Ubuntu/Debian、**CentOS 8 / Stream 9 或以上**。
+> ⚠️ **CentOS 7 不行**：其内核太旧（3.10），没有 BTF（Falco modern eBPF 强依赖）也没有 BPF LSM，无法运行本项目。需先升级到 CentOS 8/Stream 9+。
 
 ## 第 1 步：装前置（监测机上，一次性）
 
