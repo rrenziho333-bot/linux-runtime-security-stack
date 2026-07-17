@@ -53,30 +53,40 @@ grep -w bpf /sys/kernel/security/lsm
 
 ### 1.2 编译了但没加载：改 grub 引导参数
 
-把 `bpf` 追加到 `lsm=` 启动参数。`lsm=` 是逗号分隔，`bpf` 放最后即可。
+这种情况说明内核**有能力**（编译了 `CONFIG_BPF_LSM=y`），但启动时**没被启用**——
+LSM 要不要加载由内核启动参数 `lsm=` 决定，所以得把 `bpf` 加进这个参数。
 
-先编辑 `/etc/default/grub`，在 `GRUB_CMDLINE_LINUX_DEFAULT` 末尾加 lsm 参数：
+需要两步：先改 grub 源文件，再重新生成实际生效的 grub 配置（**两步缺一不可**，
+只改源文件不重新生成不会生效）。
+
+**第 1 步：编辑 grub 源文件，在启动参数里加 bpf**
 
 ```bash
 sudo nano /etc/default/grub
-# 例如：GRUB_CMDLINE_LINUX_DEFAULT="quiet splash lsm=lockdown,y,integrity,apparmor,bpf"
 ```
+找到 `GRUB_CMDLINE_LINUX_DEFAULT=...` 这一行，在末尾的引号内追加
+`lsm=...bpf`（`lsm=` 是逗号分隔，`bpf` 放最后即可）。例如改为：
+```text
+GRUB_CMDLINE_LINUX_DEFAULT="quiet splash lsm=lockdown,y,integrity,apparmor,bpf"
+```
+（CentOS 上原有参数可能不含 `splash`，照你机器原本的来，只在末尾加 `lsm=...,bpf`。）
 
-然后按发行版重新生成 grub 配置并重启：
+**第 2 步：重新生成 grub 配置并重启**（按你的发行版与启动方式选一条）
 
 ```bash
 # Ubuntu / Debian
-sudo update-grub
-# EFI 系统：sudo grub-mkconfig -o /boot/efi/EFI/<发行版>/grub.cfg
+sudo update-grub                    # 传统 BIOS 启动
+# EFI 启动若 update-grub 报错，改用：
+#   sudo grub-mkconfig -o /boot/efi/EFI/ubuntu/grub.cfg
 
-# CentOS（没有 update-grub，用 grub2-mkconfig）
-sudo grub2-mkconfig -o /boot/grub2/grub.cfg              # BIOS 系统
-sudo grub2-mkconfig -o /boot/efi/EFI/centos/grub.cfg     # EFI 系统
+# CentOS（没有 update-grub，用 grub2-mkconfig；按 BIOS/EFI 选一条）
+sudo grub2-mkconfig -o /boot/grub2/grub.cfg              # 传统 BIOS 启动
+sudo grub2-mkconfig -o /boot/efi/EFI/centos/grub.cfg     # EFI 启动
 
 sudo reboot
 ```
 
-重启后再次 `grep -w bpf /sys/kernel/security/lsm`，含 `bpf` 即成功。
+重启后再次 `grep -w bpf /sys/kernel/security/lsm`，输出列表里含 `bpf` 即成功。
 
 ### 1.3 没编译支持：换内核或自编译（可选，代价较高）
 
