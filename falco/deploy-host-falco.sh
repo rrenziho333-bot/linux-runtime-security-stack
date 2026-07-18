@@ -22,6 +22,78 @@ for rule_source in "${RULE_SOURCE_DIR}"/*.yaml; do
   install -D -o root -g root -m 0644 "${rule_source}" "${rule_target}"
 done
 
+# The 95-security-stack-exceptions.yaml file appends two well-known official
+# Falco symbols (list bpf_profiled_binaries, macro user_known_write_below_root_
+# activities). Those symbols exist in some Falco releases and were removed in
+# others (e.g. 0.44.x dropped both). append-style entries point at a symbol
+# that does not exist is a hard load error for Falco, so we strip any block in
+# the deployed 95 file whose "- list:" / "- macro:" name is absent from the
+# official rule files that will actually be loaded. This keeps the whitelist
+# effective on versions that provide the symbols and harmless on versions that
+# don't, instead of breaking deployment.
+EXCEPTIONS_FILE="/etc/falco/rules.d/95-security-stack-exceptions.yaml"
+if [[ -f ${EXCEPTIONS_FILE} ]]; then
+  OFFICIAL_FILES=()
+  for f in \
+    /etc/falco/falco_rules.yaml \
+    /etc/falco/falco-sandbox_rules.yaml \
+    /etc/falco/falco-incubating_rules.yaml; do
+    [[ -f ${f} ]] && OFFICIAL_FILES+=("${f}")
+  done
+  python3 - "${EXCEPTIONS_FILE}" "${OFFICIAL_FILES[@]}" <<'PY'
+from pathlib import Path
+import re
+import sys
+
+exc_path = Path(sys.argv[1])
+official_paths = [Path(p) for p in sys.argv[2:]]
+official_text = "\n".join(p.read_text(encoding="utf-8") for p in official_paths)
+lines = exc_path.read_text(encoding="utf-8").splitlines(keepends=True)
+
+# A "- list:" / "- macro:" / "- rule:" line at column 0 opens a top-level
+# block that absorbs following indented/blank lines until the next column-0
+# opener. We keep a list/macro block only if the named symbol also exists in
+# the official rules; an append block pointing at a symbol Falco removed makes
+# `falco --dry-run` abort with "no list/macro by that name". Comments and
+# rules are always kept.
+TOPLEVEL = re.compile(r"^- (list|macro|rule): (\S+)")
+kept = []
+buf = []
+buf_name = None
+dropped = []
+
+def symbol_exists(name):
+    pat = re.compile(r"(?m)^- (?:list|macro): " + re.escape(name) + r"\s*$")
+    return bool(pat.search(official_text))
+
+for line in lines:
+    m = TOPLEVEL.match(line)
+    if m:
+        if buf_name is None:
+            kept.extend(buf)
+        elif symbol_exists(buf_name):
+            kept.extend(buf)
+        else:
+            dropped.append(buf_name)
+        buf = [line]
+        buf_name = m.group(2)
+    else:
+        buf.append(line)
+# Flush the final block.
+if buf_name is None:
+    kept.extend(buf)
+elif symbol_exists(buf_name):
+    kept.extend(buf)
+else:
+    dropped.append(buf_name)
+
+if dropped:
+    exc_path.write_text("".join(kept), encoding="utf-8")
+    print("Stripped 95-exceptions blocks whose official symbol is missing: "
+          + ", ".join(dropped), file=sys.stderr)
+PY
+fi
+
 python3 - "${FALCO_CONFIG}" <<'PY'
 from pathlib import Path
 import re
