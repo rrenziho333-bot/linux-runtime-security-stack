@@ -160,28 +160,75 @@ function _falco_validate_existing() {
 _falco_validate_existing
 
 # Ensure Falco writes JSON events to the file TSA watches (/var/log/falco/
-# falco.json). Modern Falco (0.44+) defaults to stdout/journald and does NOT
-# create that file, so TSA's falco source would watch a path that never
-# appears. We drop an override into /etc/falco/config.d (loaded via the
-# `config_files` mechanism, a Stable feature) rather than mutating the main
-# falco.yaml, which is cleaner, reversible, and version-robust. The directory
-# may not exist on minimal installs.
+# falco.json) AND that the file is readable by TSA's non-root user (adm group).
+# Three things must line up across Falco versions:
+#   1. json_output must be on, so Falco emits JSON events (not plain text).
+#   2. file_output must point Falco at /var/log/falco/falco.json.
+#   3. The file Falco creates must be group-readable (adm), since
+#      falco-modern-bpf.service ships with UMask=0077 and runs as root, which
+#      would produce 0600 root:root unreadable by the non-root tsa-fusion.
+#
+# We do #1/#2 via /etc/falco/config.d (the `config_files` Stable mechanism).
+# The shape of `json_output` changed across versions: older Falco used a map
+# (`json_output:\n  enabled: true`), Falco 0.44 flattened it to a scalar
+# (`json_output: true`). Emitting the wrong shape silently fails to enable
+# JSON output, so probe the installed falco.yaml and generate the matching
+# form. #3 is a systemd drop-in overriding UMask/Group on the falco unit.
 FALCO_OUT_DIR="/var/log/falco"
-install -d -o root -g adm -m 0750 "${FALCO_OUT_DIR}"
+install -d -o root -g adm -m 2750 "${FALCO_OUT_DIR}"
 install -d -o root -g root -m 0755 /etc/falco/config.d
-cat > /etc/falco/config.d/zz-security-stack-output.yaml <<'YAML'
-# Managed by deploy-host-falco.sh — make Falco emit JSON rule events to the
-# file TSA's fusion agent reads. Override strategy (config_files append) sets
-# scalar keys, so this turns json_output and file_output on regardless of the
-# defaults shipped by the installed Falco version.
-json_output:
-  enabled: true
-file_output:
-  enabled: true
-  keep_alive: false
-  filename: /var/log/falco/falco.json
-YAML
+
+python3 - "${FALCO_CONFIG}" > /etc/falco/config.d/zz-security-stack-output.yaml <<'PY'
+from pathlib import Path
+import re
+import sys
+
+cfg = Path(sys.argv[1]).read_text(encoding="utf-8")
+
+# Detect whether `json_output` is a scalar (Falco >= 0.44, e.g. "json_output:
+# true") or a map (older Falco, "json_output:\n  enabled: true"). Emitting the
+# wrong shape silently fails to enable JSON, so probe the installed file. Use
+# [ \t] (not \s) so the anchor never crosses a newline.
+scalar_on_line = re.search(r"(?m)^json_output:[ \t]*\S", cfg)
+map_header = re.search(r"(?m)^json_output:[ \t]*$", cfg)
+scalar_json = bool(scalar_on_line) or not map_header
+
+lines = [
+    "# Managed by deploy-host-falco.sh — make Falco emit JSON rule events to",
+    "# the file TSA's fusion agent reads, with the right shape of json_output",
+    "# for the installed Falco version.",
+]
+if scalar_json:
+    lines += ["json_output: true"]
+else:
+    lines += ["json_output:", "  enabled: true"]
+lines += [
+    "file_output:",
+    "  enabled: true",
+    "  keep_alive: false",
+    "  filename: /var/log/falco/falco.json",
+]
+sys.stdout.write("\n".join(lines) + "\n")
+PY
 chmod 0644 /etc/falco/config.d/zz-security-stack-output.yaml
+
+# 3. File permissions: the packaged falco-modern-bpf.service runs as root with
+# UMask=0077, so file_output creates 0600 root:root files the non-root tsa-fusion
+# (SupplementaryGroups=adm) cannot read. Two fixes:
+#   - The /var/log/falco dir is created setgid (mode 2750) with group adm, so
+#     files Falco creates inside inherit group adm.
+#   - A drop-in overrides the unit's UMask (0007) so those files are 0640
+#     (group-readable), without touching the packaged unit (upgrades safe).
+# tsa-fusion runs with SupplementaryGroups=adm, so it can then read the file.
+install -d -o root -g root -m 0755 /etc/systemd/system/falco-modern-bpf.service.d
+cat > /etc/systemd/system/falco-modern-bpf.service.d/security-stack.conf <<'CONF'
+# Managed by deploy-host-falco.sh — let tsa-fusion (adm group) read Falco's
+# file_output JSON. Packaged unit uses UMask=0077 (files end up 0600 root:root).
+[Service]
+UMask=0007
+CONF
+chmod 0644 /etc/systemd/system/falco-modern-bpf.service.d/security-stack.conf
+systemctl daemon-reload
 
 falco --dry-run
 
