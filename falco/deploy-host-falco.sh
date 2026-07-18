@@ -158,6 +158,31 @@ function _falco_validate_existing() {
   fi
 }
 _falco_validate_existing
+
+# Ensure Falco writes JSON events to the file TSA watches (/var/log/falco/
+# falco.json). Modern Falco (0.44+) defaults to stdout/journald and does NOT
+# create that file, so TSA's falco source would watch a path that never
+# appears. We drop an override into /etc/falco/config.d (loaded via the
+# `config_files` mechanism, a Stable feature) rather than mutating the main
+# falco.yaml, which is cleaner, reversible, and version-robust. The directory
+# may not exist on minimal installs.
+FALCO_OUT_DIR="/var/log/falco"
+install -d -o root -g adm -m 0750 "${FALCO_OUT_DIR}"
+install -d -o root -g root -m 0755 /etc/falco/config.d
+cat > /etc/falco/config.d/zz-security-stack-output.yaml <<'YAML'
+# Managed by deploy-host-falco.sh — make Falco emit JSON rule events to the
+# file TSA's fusion agent reads. Override strategy (config_files append) sets
+# scalar keys, so this turns json_output and file_output on regardless of the
+# defaults shipped by the installed Falco version.
+json_output:
+  enabled: true
+file_output:
+  enabled: true
+  keep_alive: false
+  filename: /var/log/falco/falco.json
+YAML
+chmod 0644 /etc/falco/config.d/zz-security-stack-output.yaml
+
 falco --dry-run
 
 systemctl disable --now falco-logger.service || true
