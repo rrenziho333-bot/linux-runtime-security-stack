@@ -2,7 +2,6 @@
 # __SRC_DIR__ at install time. Do not enable this file directly.
 [Unit]
 Description=Read-only TSA security pipeline dashboard
-Documentation=file:__SRC_DOCS__
 After=tsa-fusion.service bpf-lsm-controller.service falco-modern-bpf.service
 Wants=tsa-fusion.service
 
