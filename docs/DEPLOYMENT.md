@@ -1,10 +1,8 @@
 # 部署与演示
 
-> **首次部署/新手请先看 [INSTALL.md](INSTALL.md)。** 本文档假设 Falco 与 Go 等前置已装好；
-> 若你是从一台空白机器开始，先按 INSTALL 从零装好前置，再回到本文档部署。
+> 首次部署/新手请先看 [INSTALL.md](INSTALL.md)。本文档假设 Falco 和 Go 等前置已装好；从空白机器开始的，先按 INSTALL 装好前置再回来。
 >
-> 本文档适用于已装好前置的 Linux 主机（内核是否有 BPF LSM 均可：有则完整运行，
-> 无则自动降级为纯检测，见 INSTALL 第 9 节）。命令以项目根目录为当前路径。
+> 适用于已装好前置的 Linux 主机（内核有没有 BPF LSM 都行：有就完整运行，没有就自动降级为纯检测，见 INSTALL 第 9 节）。命令以项目根目录为当前路径。
 
 ## 1. 部署前确认
 
@@ -17,14 +15,12 @@ test -f ./tsa/policy_config.yaml
 
 要求：
 
-- Falco 已安装，并支持 modern eBPF；
+- Falco 已安装，支持 modern eBPF；
 - （完整模式才需要）内核启用了 BPF LSM；缺失时脚本自动降级，不阻断部署；
-- Go 1.23.10 工具链及项目依赖已经缓存；
-- TSA 源码位于项目根目录下的 `tsa/`。
+- Go 1.23.10 工具链和项目依赖已缓存；
+- TSA 源码在项目根目录下的 `tsa/`。
 
-部署脚本使用 `GOPROXY=off`，不会在 root 构建阶段联网下载依赖。
-脚本会自动按 `SUDO_USER`（运行 sudo 的用户）和脚本所在目录渲染 systemd unit，
-无需手改任何路径。
+部署脚本用 `GOPROXY=off`，root 构建阶段不联网下载依赖。脚本会按 `SUDO_USER`（运行 sudo 的用户）和脚本所在目录自动渲染 systemd unit，不用手改路径。
 
 ## 2. 一键部署
 
@@ -44,22 +40,20 @@ sudo ./deploy-security-stack.sh
 
 ### 2.1 移植到新主机
 
-部署脚本不含任何硬编码用户名或绝对路径，移植步骤：
+部署脚本没有硬编码用户名或绝对路径，移植步骤：
 
 1. 把仓库放在任意目录（如 `/opt/security-stack`），确保部署用户对其有读写权限；
-2. 确认该部署用户存在、有家目录、能 `sudo`（脚本以 `SUDO_USER` 作为运行态账户与构建账户）；
-3. 安装前置：Falco（modern eBPF）、Go 1.23、Lynis（可选）；内核 BPF LSM 可选（有则完整，无则自动降级，见 INSTALL）；
+2. 确认该部署用户存在、有家目录、能 `sudo`（脚本以 `SUDO_USER` 作为运行态账户和构建账户）；
+3. 装前置：Falco（modern eBPF）、Go 1.23、Lynis（可选）；内核 BPF LSM 可选（有则完整，无则自动降级，见 INSTALL）；
 4. `cd <仓库目录> && sudo ./deploy-security-stack.sh`。
 
-脚本会以 `SUDO_USER` 和脚本所在目录渲染 `systemd/*.service` 中的
-`__RUNTIME_USER__` / `__SRC_DIR__` 占位符，再装到 `/etc/systemd/system/`。
-渲染后会校验无占位符残留，残留则中断部署。
+脚本会以 `SUDO_USER` 和脚本所在目录渲染 `systemd/*.service` 里的 `__RUNTIME_USER__` / `__SRC_DIR__` 占位符，再装到 `/etc/systemd/system/`。渲染后会校验无占位符残留，有残留就中断部署。
 
 ### 2.2 运行与实时检测
 
 部署完成后，服务常驻由 systemd 管理。实时检测有三条观察通道：
 
-**触发一次检测（默认 audit 模式，不阻断）：**
+触发一次检测（默认 audit 模式，不阻断）：
 
 ```bash
 echo "demo" | sudo tee -a /etc/tsa-protected-demo >/dev/null   # policy.yaml 默认保护该文件
@@ -68,22 +62,17 @@ sudo tail -n 3 /var/log/bpf-lsm/events.jsonl | jq   # BPF LSM 审计事件（仅
 journalctl -u tsa-fusion -n 10 --no-pager           # TSA 评分日志（两种模式都有）
 ```
 
-> **降级模式**（无 BPF LSM）：`/var/log/bpf-lsm/events.jsonl` 不存在属正常，跳过那条 tail；
-> 看 Falco 报警用 `sudo tail -n 5 /var/log/falco/falco.json | jq`，TSA 评分日志照常查看。
+> 降级模式（无 BPF LSM）：`/var/log/bpf-lsm/events.jsonl` 不存在属正常，跳过那条 tail；看 Falco 报警用 `sudo tail -n 5 /var/log/falco/falco.json | jq`，TSA 评分日志照常查看。
 
-**实时看板（每 2 秒自动刷新）：**
+实时看板（每 2 秒自动刷新）：
 
 ```text
 http://127.0.0.1:8766/
 ```
 
-看板展示流水线状态、BPF 策略、风险评分与 Falco/BPF 证据链，只读。
-服务绑定 `0.0.0.0:8766`，**可被别的主机访问**（本机用 `http://127.0.0.1:8766/`，
-别的主机用 `http://<监测机IP>:8766/`，监测机 IP 用 `ip a` 或 `hostname -I` 查）；
-部署脚本会自动放行监测机防火墙 8766 端口。
-公开接口 `GET /systemManage/risk/score` 供外部系统程序化查询实时风险分值（统一响应信封）。
+看板展示流水线状态、BPF 策略、风险评分和 Falco/BPF 证据链，只读。服务绑 `0.0.0.0:8766`，可被别的主机访问（本机用 `http://127.0.0.1:8766/`，别的主机用 `http://<监测机IP>:8766/`，监测机 IP 用 `ip a` 或 `hostname -I` 查）；部署脚本会自动放行监测机防火墙 8766 端口。公开接口 `GET /systemManage/risk/score` 供外部系统程序化查询实时风险分（统一响应信封）。
 
-**持续跟随日志（实时）：**
+持续跟随日志（实时）：
 
 ```bash
 journalctl -u bpf-lsm-controller -u tsa-fusion -u falco-modern-bpf -f   # -f 实时跟随（降级模式去掉 -u bpf-lsm-controller）
@@ -103,7 +92,7 @@ systemctl is-enabled bpf-lsm-controller
 ```
 
 - `falco-modern-bpf`、`tsa-fusion`、`tsa-dashboard` 应为 `active`/`enabled`；
-- `bpf-lsm-controller`：完整模式 `active`/`enabled`；降级模式 `inactive`/`disabled`（脚本未安装它）。
+- `bpf-lsm-controller`：完整模式 `active`/`enabled`；降级模式 `inactive`/`disabled`（脚本没装它）。
 
 查看启动日志：
 
@@ -113,8 +102,7 @@ journalctl -u bpf-lsm-controller -u tsa-fusion -u tsa-dashboard -n 30 --no-pager
 
 ## 4. 演示一次完整检测
 
-> 本节的“完整证据链”需**完整模式**（内核有 BPF LSM）。降级模式下没有 BPF 侧事件，
-> 只能验证 Falco 报警 + TSA 评分，可跳过下文带 `bpf-lsm` 字样的步骤。
+> 本节的"完整证据链"需要完整模式（内核有 BPF LSM）。降级模式下没有 BPF 侧事件，只能验证 Falco 报警 + TSA 评分，可跳过下文带 `bpf-lsm` 字样的步骤。
 
 当前保护对象：
 
@@ -128,7 +116,7 @@ journalctl -u bpf-lsm-controller -u tsa-fusion -u tsa-dashboard -n 30 --no-pager
 AUDIT：记录并报警，但不阻止操作
 ```
 
-执行（若文件不存在，部署脚本会自动创建；也可手动 `sudo install -m 0640 /dev/null /etc/tsa-protected-demo`）：
+执行（文件不存在时部署脚本会自动创建；也可手动 `sudo install -m 0640 /dev/null /etc/tsa-protected-demo`）：
 
 ```bash
 echo "security-demo" | sudo tee -a /etc/tsa-protected-demo >/dev/null
@@ -171,14 +159,13 @@ tee 请求 write
 ./falco/rules.d/
 ```
 
-修改后执行部署脚本。脚本会加载官方规则、自定义规则和例外进行完整校验，
-校验通过后才重启 Falco：
+修改后执行部署脚本。脚本会加载官方规则、自定义规则和例外做完整校验，校验通过才重启 Falco：
 
 ```bash
 sudo ./deploy-security-stack.sh
 ```
 
-Falco 负责报警，不承担阻断。
+Falco 只负责报警，不承担阻断。
 
 ## 6. 修改 BPF LSM 策略
 
@@ -188,7 +175,7 @@ Falco 负责报警，不承担阻断。
 ./policy.yaml
 ```
 
-新增保护对象时，为每条策略提供唯一 ID、名称、模式和绝对路径：
+新增保护对象时，每条策略要有唯一 ID、名称、模式和绝对路径：
 
 ```yaml
 - id: 1002
@@ -200,8 +187,7 @@ Falco 负责报警，不承担阻断。
   expires_after: ""
 ```
 
-先保持 `audit`，观察正常访问并完善 `allowed_uids`。只有完成回滚测试后，
-才能逐条改为 `enforce`。
+先保持 `audit`，观察正常访问、完善 `allowed_uids`。只有完成回滚测试后，才能逐条改为 `enforce`。
 
 重新部署：
 
@@ -249,10 +235,7 @@ journalctl -u falco-modern-bpf -n 30 --no-pager
 
 ## 9. 对外接口：查询实时风险分值
 
-看板服务（`tsa-dashboard`，绑 `0.0.0.0:8766`）对外暴露一个只读 HTTP 接口，
-遵循《零信任管理系统接口文档》地面系统 HTTP 接口规范的统一响应信封
-`{code, status, message, data}`。外部系统（如零信任管理系统）可用它程序化查询
-监测主机的实时风险分值。
+看板服务（`tsa-dashboard`，绑 `0.0.0.0:8766`）对外暴露一个只读 HTTP 接口，遵循《零信任管理系统接口文档》地面系统 HTTP 接口规范的统一响应信封 `{code, status, message, data}`。外部系统（如零信任管理系统）可用它程序化查询监测主机的实时风险分。
 
 ### 9.1 接口规格
 
@@ -298,14 +281,14 @@ curl -s http://127.0.0.1:8766/systemManage/risk/score | jq
 
 前提：监测机已部署、防火墙已放行 8766（部署脚本自动放行；云主机还需在云控制台安全组放行）。
 
-在**另一台主机**上执行：
+在另一台主机上执行：
 
 ```bash
 # 把 <监测机IP> 换成监测主机的实际 IP
 curl -s http://<监测机IP>:8766/systemManage/risk/score | jq
 ```
 
-能拿到上面的统一信封分值，即说明他机可访问监测主机的实时分数。
+能拿到上面的统一信封分值，就说明他机可访问监测主机的实时分数。
 
 也可用浏览器打开 `http://<监测机IP>:8766/` 看网页看板。
 
@@ -320,4 +303,4 @@ sudo firewall-cmd --list-ports | grep 8766
 sudo ufw status | grep 8766
 ```
 
-若都正常仍不通：监测机若是云主机，检查云平台**安全组**是否放行 8766 入站（系统防火墙之外的层）。
+若都正常仍不通：监测机若是云主机，检查云平台安全组是否放行 8766 入站（系统防火墙之外的层）。

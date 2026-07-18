@@ -1,94 +1,62 @@
-# 新手一键验证清单
+# 快速验证（5 步）
 
-从一台空白 Linux 到"**别人 curl 拿到这台机器的风险分数**"，5 步。每步附期望输出，照着对答案。
+从空白 Linux 到"别人 curl 拿到分数"。只敲命令、看输出就行，原理看 [INSTALL.md](INSTALL.md)。
 
-> 这是最短路径。详细原理、降级说明、排障见 [INSTALL.md](INSTALL.md) 与 [DEPLOYMENT.md](DEPLOYMENT.md)。
-> 支持发行版：Ubuntu/Debian、**CentOS 8 / Stream 9 或以上**。
-> ⚠️ **CentOS 7 不行**：其内核太旧（3.10），没有 BTF（Falco modern eBPF 强依赖）也没有 BPF LSM，无法运行本项目。需先升级到 CentOS 8/Stream 9+。
+> 发行版：Ubuntu 22.04+ 或 CentOS 8/Stream 9+。CentOS 7 不行（内核太旧）。
 
-## 第 1 步：装前置（监测机上，一次性）
+## 1. 装前置（监测机，一次性）
 
 ```bash
-# Falco（以 Ubuntu 为例；CentOS 用 dnf + rpm 源，见 INSTALL §2）
-sudo mkdir -p /etc/apt/keyrings
-curl -s https://falco.org/repo/falcosecurity-packages.asc | sudo gpg --dearmor -o /etc/apt/keyrings/falco-archive-keyring.gpg
-echo "deb [signed-by=/etc/apt/keyrings/falco-archive-keyring.gpg] https://download.falco.org/packages/deb stable main" | sudo tee /etc/apt/sources.list.d/falcosecurity.list
-sudo apt-get update && sudo apt-get install -y falco
+# Falco（Ubuntu；CentOS 见 INSTALL §2）
+sudo install -dm755 /etc/apt/keyrings
+curl -s https://falco.org/repo/falcosecurity-packages.asc | sudo gpg --dearmor -o /etc/apt/keyrings/falco.gpg
+echo "deb [signed-by=/etc/apt/keyrings/falco.gpg] https://download.falco.org/packages/deb stable main" | sudo tee /etc/apt/sources.list.d/falco.list
+sudo apt update && sudo apt install -y falco
 
-# Go 1.23（仅完整模式需要；不确定就先装上）
+# Go
 wget -q https://go.dev/dl/go1.23.10.linux-amd64.tar.gz
-sudo rm -rf /usr/local/go && sudo tar -C /usr/local -xzf go1.23.10.linux-amd64.tar.gz
-/usr/local/go/bin/go version    # 应输出 go1.23.x
+sudo tar -C /usr/local -xzf go1.23.10.linux-amd64.tar.gz
+ls /sys/kernel/btf/vmlinux    # 必须存在
 ```
 
-> 内核需有 BTF：`ls /sys/kernel/btf/vmlinux` 存在即可（多数发行版默认有）。BPF LSM 可选——有则带阻断，无则自动降级为纯检测。
-
-## 第 2 步：clone + 拉依赖 + 部署（监测机上）
+## 2. 部署（监测机）
 
 ```bash
 git clone https://github.com/rrenziho333-bot/linux-runtime-security-stack.git ~/lrss
 cd ~/lrss
-/usr/local/go/bin/go mod download     # 拉一次 Go 依赖（需有网）；降级模式可跳过
-sudo ./deploy-security-stack.sh       # 一键部署：探测内核、起服务、放行 8766
+/usr/local/go/bin/go mod download
+sudo ./deploy-security-stack.sh
 ```
 
-部署结尾会打印 `Dashboard: http://...8766/` 与 `Risk score API: ...`，即成功。
-（降级模式会打印 `DETECTION-ONLY mode`，正常。）
-
-## 第 3 步：确认服务在跑（监测机上）
+## 3. 看服务（监测机）
 
 ```bash
 systemctl is-active falco-modern-bpf tsa-fusion tsa-dashboard
-# 期望三行 active（完整模式再加 bpf-lsm-controller 即四行 active）
 ```
+期望三行 `active`。
 
-## 第 4 步：本机自己查分数（监测机上）
+## 4. 本机查分数（监测机）
 
 ```bash
 curl -s http://127.0.0.1:8766/systemManage/risk/score | jq
 ```
-
 期望：
-
 ```json
-{
-  "code": 20000,
-  "status": true,
-  "message": "操作成功",
-  "data": { "final": 100.0, "posture": 100.0, "runtime": 100.0, "generated_time": "..." }
-}
+{"code":20000,"status":true,"message":"操作成功","data":{"final":100.0,"posture":100.0,"runtime":100.0,"generated_time":"..."}}
 ```
 
-`final` 就是监测机当前风险分（满分 100，越低越危险）。能返回这个，部署就成功了。
+## 5. 别人查分数（另一台主机）
 
-## 第 5 步：别人访问端口拿分数（在另一台主机上）
+监测机查 IP：`ip a | grep "inet " | grep -v 127.0.0.1`，取局域网地址（如 192.168.1.50）。
 
-先在监测机上查 IP：
-
-```bash
-ip a | grep "inet " | grep -v 127.0.0.1     # 取局域网地址，假设是 192.168.1.50
-```
-
-然后在**另一台主机**上：
-
+另一台主机：
 ```bash
 curl -s http://192.168.1.50:8766/systemManage/risk/score | jq
 ```
+拿到和第 4 步一样的 JSON，就通了。
 
-拿到和第 4 步一样的分值 JSON，**就实现了"别人访问端口获得该机器的分数"**。
+## 不通？
 
-## 拿不到分数？
-
-- **别人访问不通**：监测机若是云主机，去云控制台**安全组**放行 8766 入站（系统防火墙脚本已放，安全组是另一层）；监测机上 `ss -ltnp | grep 8766` 确认在监听 `0.0.0.0:8766`。
-- **本机 curl 返回 50000**：TSA 状态库未就绪，`systemctl status tsa-fusion` 看是否 active。
-- **部署失败**：通常前置没装好——回 INSTALL §1-§3 检查 Falco/Go/BTF。
-- 更多排障见 [DEPLOYMENT.md](DEPLOYMENT.md) §8。
-
-## 一次端到端 demo
-
-```bash
-# 监测机上触发一次检测（写受保护文件）
-echo "demo" | sudo tee -a /etc/tsa-protected-demo >/dev/null; sleep 2
-# 分数会从 100 下降（临时风险扣分），随后随风险过期回升
-watch -n2 'curl -s http://127.0.0.1:8766/systemManage/risk/score | jq .data.final'
-```
+- 别人访问不通：云主机要去云控制台安全组放行 8766；本机 `ss -ltnp | grep 8766` 应见 `0.0.0.0:8766`。
+- 返回 `code:50000`：`systemctl status tsa-fusion` 看 active 没有。
+- 部署失败：多半是前置没装好，回 INSTALL §1–§3。
