@@ -77,6 +77,47 @@ curl -s http://192.168.1.50:8766/systemManage/risk/score | jq
 ```
 拿到和第 4 步一样的 JSON，就通了。
 
+## 6. 一眼确认复现成功
+
+部署完跑这一段，四层证据（服务 / 事件 / 分数 / 规则）一次看全。全部符合就是真复现成功。
+
+```bash
+echo "===== 服务 ====="
+systemctl is-active falco-modern-bpf bpf-lsm-controller tsa-fusion tsa-dashboard
+echo "===== 模式 ====="
+grep -wq bpf /sys/kernel/security/lsm && echo "完整模式" || echo "降级模式"
+echo "===== 触发检测 ====="
+echo verify | sudo tee -a /etc/tsa-protected-demo >/dev/null
+sleep 3
+echo "--- Falco ---"
+sudo tail -n 3 /var/log/falco/falco.json | jq -c '{rule, priority}'
+echo "--- BPF LSM ---"
+sudo tail -n 1 /var/log/bpf-lsm/events.jsonl 2>/dev/null | jq -c '{action, policy_name}' 2>/dev/null || echo "(无 = 降级模式正常)"
+echo "--- TSA 评分 ---"
+journalctl -u tsa-fusion -n 6 --no-pager | grep scored
+echo "===== 分数 ====="
+curl -s http://127.0.0.1:8766/systemManage/risk/score | jq '.data'
+echo "===== 规则统计 ====="
+echo "官方规则数: $(grep -c '^- rule:' /etc/falco/falco_rules.yaml)"
+echo "自定义规则文件:"; ls /etc/falco/rules.d/
+```
+
+**期望看到什么：**
+
+| 项 | 完整模式 | 降级模式 |
+|---|---|---|
+| 服务 | 4 行 `active` | `bpf-lsm-controller` 是 `inactive`，其余 3 行 `active` |
+| 模式 | "完整模式" | "降级模式" |
+| Falco | `{"rule":"Monitor specific file access","priority":"Warning"}` | 同左 |
+| BPF LSM | `{"action":"audit","policy_name":"protect_demo_config"}` | "(无 = 降级模式正常)" |
+| TSA 评分 | **两条** `scored`：Falco `points=-5` + BPF `points=-2` | **一条** `scored`：Falco `points=-5` |
+| 分数 | `runtime` 低于 100（Falco 扣 5 + BPF 扣 2），`final = posture×0.4 + runtime×0.6` | `runtime` 低于 100（扣 5），`final` 同公式 |
+| 规则统计 | 官方规则数有值；自定义文件含 `90-local-file-monitoring.yaml`、`95-security-stack-exceptions.yaml` | 同左 |
+
+浏览器看板 `http://127.0.0.1:8766/`：流水线区 Falco/TSA 绿色 active、风险评分区有数值、证据链区出现刚才 `tee` 写 `/etc/tsa-protected-demo` 的事件——也齐了。
+
+任一层不对，对照 [INSTALL.md](INSTALL.md) §6 的四步验证排。
+
 ## 不通？
 
 - 别人访问不通：云主机要去云控制台安全组放行 8766；本机 `ss -ltnp | grep 8766` 应见 `0.0.0.0:8766`。
