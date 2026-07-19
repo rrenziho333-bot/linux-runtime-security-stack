@@ -128,7 +128,7 @@ CentOS：
 
 ## 2. 安装 Falco（modern eBPF 驱动）
 
-项目用 Falco 0.42+ 的 modern eBPF 驱动（不依赖旧的 Kmodule/legacy 驱动），服务名 `falco-modern-bpf.service`。部署脚本里的 `falco/deploy-host-falco.sh` 只负责往 `/etc/falco/falco.yaml` 塞规则并重启服务，不负责安装 Falco 本体，所以必须先装好。
+项目用 Falco 的 modern eBPF 驱动（不依赖旧的 Kmodule/legacy 驱动），服务名 `falco-modern-bpf.service`。实测在 Falco 0.44.x 上跑通；部署脚本里的 `falco/deploy-host-falco.sh` 已适配多版本配置差异，只负责往 `/etc/falco/falco.yaml` 塞规则并重启服务，不负责安装 Falco 本体，所以必须先装好。
 
 ### 2.1 官方源安装（推荐）
 
@@ -164,17 +164,26 @@ ls /sys/kernel/btf/vmlinux   # 存在即可
 
 > 降级模式可跳过本节。Go 只用来编译 BPF LSM 控制器（`bpf-lsm-controller`）。若内核没有 BPF LSM、走降级模式，部署脚本会自动跳过 Go 编译，不用装 Go。要完整模式（内核级阻断）才必须装。
 
-部署脚本写死 `/usr/local/go/bin/go`，需 Go 1.23。
+部署脚本写死 `/usr/local/go/bin/go`，需 **Go 1.25**（项目的 `go.mod` 声明 `go 1.25.0`，依赖 `cilium/ebpf v0.22.0` 要求 1.25）。直接装 1.25，避免部署时 `GOTOOLCHAIN=auto` 又去联网下载工具链。
 
 ```bash
-GO_VERSION=1.23.10
-wget -q https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz
+wget https://go.dev/dl/go1.25.0.linux-amd64.tar.gz
 sudo rm -rf /usr/local/go
-sudo tar -C /usr/local -xzf go${GO_VERSION}.linux-amd64.tar.gz
-/usr/local/go/bin/go version    # 应输出 go1.23.x
+sudo tar -C /usr/local -xzf go1.25.0.linux-amd64.tar.gz
+/usr/local/go/bin/go version    # 应输出 go1.25.x
 ```
 
-Go 依赖要在有网环境预先拉到模块缓存（部署脚本用 `GOPROXY=off` 离线构建）。这一步要在 clone 项目之后做（需要项目的 `go.mod`），所以放到 §5 克隆之后，本节只装工具链就行。
+> `go.dev` 国内直连慢或超时：换阿里云镜像 `https://mirrors.aliyun.com/golang/go1.25.0.linux-amd64.tar.gz`。下完先 `ls -lh` 看大小（约 70MB）再解压；下成空文件直接 `tar` 会报错。
+
+> 为什么是 1.25 不是 1.23：`cilium/ebpf v0.19.0` 在 Ubuntu 6.8 内核上会因为某个内核模块（`sha1_ssse3`）的 BTF 字符串表为空而启动失败，项目升级到了 `cilium/ebpf v0.22.0` 修复这个问题，而 v0.22 要求 Go ≥ 1.25。
+
+Go 依赖要在有网环境预先拉到模块缓存（部署脚本用 `GOPROXY=off` 离线构建）。这一步要在 clone 项目之后做（需要项目的 `go.mod`），所以放到 §5 克隆之后，本节只装工具链就行。国内拉模块记得先换代理：
+
+```bash
+/usr/local/go/bin/go env -w GOPROXY=https://goproxy.cn,direct
+```
+
+（`goproxy.cn` 是七牛维护的国内 Go 模块镜像，直连稳定。）
 
 ## 4. 安装 Lynis（可选，仅基线分）
 
@@ -349,6 +358,67 @@ $ curl -s http://127.0.0.1:8766/healthz
 
 实时持续监测、盯日志命令见 [DEPLOYMENT.md](DEPLOYMENT.md) 第 2.2 节。
 
+### 6.6 风险评分怎么算
+
+对外接口 `GET /systemManage/risk/score` 返回三个分。搞懂它们，才知道分数是哪来的、靠不靠谱。
+
+**三个分：**
+
+| 分数 | 含义 | 来源 |
+|---|---|---|
+| `posture` | 静态基线分（系统配置层面的风险） | Lynis 检查（SSH、密码策略、防火墙、补丁等）。没装 Lynis 则恒 100 |
+| `runtime` | 运行时分（实时行为触发的风险） | Falco + BPF LSM 实时事件扣分 |
+| `final` | 最终风险分 | `posture×0.4 + runtime×0.6`（权重在 `tsa/policy_config.yaml` 的 `scoring.weights`） |
+
+满分 100，**越低越危险**。
+
+**一次操作怎么变成扣分（完整模式实例）：**
+
+写一次受保护文件：
+
+```bash
+echo test | sudo tee -a /etc/tsa-protected-demo >/dev/null
+```
+
+完整模式下，这一笔同时被两个检测源抓住：
+
+1. **Falco** 命中自定义规则 `Monitor specific file access` → 输出事件 → TSA 减 `runtime` 5 分（按 `policy_config.yaml` → `runtime_rules.specific_rules["Monitor specific file access"].points: 5`）。
+2. **BPF LSM** 内核 hook 命中策略 `protect_demo_config`、`audit` 模式 → 产生审计事件 → TSA 减 `runtime` 2 分（按 `policy_config.yaml` → `bpf_lsm.action_points.audit: 2`；若 `enforce` 拒绝则扣 8）。
+
+`tsa-fusion` 日志会同时记两条：
+
+```
+WARNING Falco rule=Monitor specific file access status=scored points=-5 runtime=95.00
+WARNING BPF LSM policy=protect_demo_config action=audit status=scored points=-2 runtime=93.00
+```
+
+降级模式没有 BPF LSM，只有第一条 Falco 那条。
+
+**扣分怎么定？两套规则：**
+
+- **按规则名定分**（`specific_rules`）：给每条 Falco 官方/自定义规则配固定分值。比如挖矿 `Detect crypto miners` 扣 20、你这条文件监控扣 5。TSA 拿到事件先查这张表。
+- **按严重级别兜底**（`priority_mapping`）：规则名没在 `specific_rules` 里，就按 Falco 报告的 `priority` 扣——`EMERGENCY:40、ALERT:30、CRITICAL:20、ERROR:10、WARNING:5、NOTICE:2`。
+
+**分数会自动回血，不是永久累积：**
+
+每个事件扣的风险有寿命（`risk_ttl_seconds`）。你这条事件是 3600 秒（1 小时）——1 小时内没新事件，这 5/2 分自动回升，`runtime` 慢慢回到 100。不同严重级别过期时间不同（`risk_ttl_by_priority`：DEBUG 5 分钟、CRITICAL 24 小时）。日志里会看到 `Runtime score recovered by N to NN`。
+
+也就是说，分数反映的是**当前还有多少未过期的风险**，不是"累犯了多少次"。系统安静一段时间，分就回满。
+
+**防刷机制（防一个动作刷爆分数）：**
+
+`event_control` 限三道：
+
+- `dedup_window`（秒）：窗口期内同一规则重复事件只算一次。
+- `max_points_per_minute`：每分钟最多扣这么多分。
+- `max_active_points_per_rule`：单条规则累计最多扣这么多分。
+
+所以你连续 `echo` 十次，只扣一次的分；不会因重复操作把 `runtime` 刷到 0。
+
+**想看实际扣分配置：**
+
+全在 `tsa/policy_config.yaml`：`scoring.weights`（权重）、`runtime_rules.specific_rules`（每条 Falco 规则的扣分）、`runtime_rules.priority_mapping`（优先级兜底）、`bpf_lsm.action_points`（BPF 审计/拒绝各扣几分）、`baseline_lynis.deduct_by_control`（Lynis 各控制项扣几分）。
+
 ## 7. 关于 Falco 规则数量
 
 项目自带的检测规则只有 1 条：`falco/rules.d/90-local-file-monitoring.yaml`（盯 `/etc/tsa-protected-demo` 的 open）。但实际生效的规则远不止此——部署时 `deploy-host-falco.sh` 会加载 Falco 官方规则集（`falco_rules.yaml` + `falco-sandbox_rules.yaml` + `falco-incubating_rules.yaml`，共 93 条，覆盖提权、容器逃逸、挖矿、反弹 shell、敏感文件读写等）。官方规则快照已入库到 `falco/official-rules/`，clone 后可直接阅读；要和本机已装 Falco 版本对齐，用 `falco/fetch-official-rules.sh` 重新拉取，见第 10 节。
@@ -360,6 +430,12 @@ TSA 的 `tsa/policy_config.yaml` 里 `specific_rules` 为这 93 条中的 86 条
 - 完整模式（有 BPF LSM）：叠加 BPF LSM 内核级精确决策/阻断；
 - 降级模式（无 BPF LSM）：仅 Falco 纯检测（无内核阻断）。
 
+> **不同 Falco 版本差异（部署脚本已自动处理，无须手动改）**：官方规则集随 Falco 版本变化，部署脚本会按本机实情适配，下面这些坑它都自己兜了，遇到不报错就是正常：
+> - 老的 `falco.yaml` 把 `falco-sandbox_rules.yaml`/`falco-incubating_rules.yaml` 列进 `rules_files`，Falco 0.44 默认不再列。`deploy-host-falco.sh` 会探测并把磁盘上实际存在的规则文件以正确顺序重排进 `rules_files`，不会硬匹配某个固定布局。
+> - `95-security-stack-exceptions.yaml` 用 `append` 给两个官方符号（`bpf_profiled_binaries`、`user_known_write_below_root_activities`）加白名单，但 Falco 0.44 已删这两个符号，`append` 一个不存在的符号会让 Falco 启动失败。部署时脚本会探测这些符号在不在本机官方规则里，不在的整段剥离、不报错。
+> - 老的 `json_output` 是 map（`enabled: true`），0.44 拍平成 scalar（`json_output: true`）。脚本探测形态生成匹配的 override。
+> 上面写"93 条/86 条"是项目实现的参考量级，**以你机器实际安装的 Falco 版本为准**——想看本机确切条数，跑 `grep -c '^- rule:' /etc/falco/falco_rules.yaml`。
+
 ## 8. 一览检查清单
 
 **必选（检测流水线，对应完整或降级模式）：**
@@ -370,7 +446,7 @@ TSA 的 `tsa/policy_config.yaml` 里 `specific_rules` 为这 93 条中的 86 条
 - [ ] `falco-modern-bpf`、`tsa-fusion`、`tsa-dashboard` 三项 `active`
 
 **完整模式额外（启用内核级阻断时）：**
-- [ ] `/usr/local/go/bin/go version` 输出 1.23.x，依赖已缓存（降级模式无需 Go）
+- [ ] `/usr/local/go/bin/go version` 输出 1.25.x，依赖已缓存（降级模式无需 Go）
 - [ ] `grep CONFIG_BPF_LSM /boot/config-$(uname -r)` 输出 `=y`
 - [ ] `grep -w bpf /sys/kernel/security/lsm` 含 `bpf`
 - [ ] `bpf-lsm-controller` `active`（inactive 则为降级，非故障，见第 9 节）

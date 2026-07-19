@@ -17,7 +17,7 @@ test -f ./tsa/policy_config.yaml
 
 - Falco 已安装，支持 modern eBPF；
 - （完整模式才需要）内核启用了 BPF LSM；缺失时脚本自动降级，不阻断部署；
-- Go 1.23.10 工具链和项目依赖已缓存；
+- Go 1.25 工具链和项目依赖已缓存；
 - TSA 源码在项目根目录下的 `tsa/`。
 
 部署脚本用 `GOPROXY=off`，root 构建阶段不联网下载依赖。脚本会按 `SUDO_USER`（运行 sudo 的用户）和脚本所在目录自动渲染 systemd unit，不用手改路径。
@@ -44,7 +44,7 @@ sudo ./deploy-security-stack.sh
 
 1. 把仓库放在任意目录（如 `/opt/security-stack`），确保部署用户对其有读写权限；
 2. 确认该部署用户存在、有家目录、能 `sudo`（脚本以 `SUDO_USER` 作为运行态账户和构建账户）；
-3. 装前置：Falco（modern eBPF）、Go 1.23、Lynis（可选）；内核 BPF LSM 可选（有则完整，无则自动降级，见 INSTALL）；
+3. 装前置：Falco（modern eBPF）、Go 1.25、Lynis（可选）；内核 BPF LSM 可选（有则完整，无则自动降级，见 INSTALL）；
 4. `cd <仓库目录> && sudo ./deploy-security-stack.sh`。
 
 脚本会以 `SUDO_USER` 和脚本所在目录渲染 `systemd/*.service` 里的 `__RUNTIME_USER__` / `__SRC_DIR__` 占位符，再装到 `/etc/systemd/system/`。渲染后会校验无占位符残留，有残留就中断部署。

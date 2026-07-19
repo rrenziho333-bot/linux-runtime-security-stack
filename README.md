@@ -5,6 +5,9 @@
 - 从空白机器开始装前置：[docs/INSTALL.md](docs/INSTALL.md)
 - 最快跑通（5 步，从 clone 到别人 curl 拿分）：[docs/QUICKSTART.md](docs/QUICKSTART.md)
 - 已装好前置、只需部署和实时检测：[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)
+- 风险分怎么算：[docs/INSTALL.md](docs/INSTALL.md) §6.6
+
+> **验证环境**：Ubuntu 22.04（kernel 6.8）+ Falco 0.44.x + Go 1.25 上完整模式端到端跑通（Falco 检测 + BPF LSM 内核审计 + TSA 双源评分 + 看板 + 对外接口）。部署脚本已适配 Falco 多版本差异，新手照 QUICKSTART 可从空白机一次性复现。
 
 ## 30 秒速览
 
@@ -69,8 +72,8 @@ echo test | sudo tee -a /etc/tsa-protected-demo >/dev/null
 
 ## 4. 当前实现
 
-- Falco 0.42.1，主机版 modern eBPF 驱动；
-- 检测规则 = Falco 官方规则集（93 条，覆盖提权/容器逃逸/挖矿/反弹 shell 等）+ 1 条自定义文件监控规则（`falco/rules.d/`）；官方规则快照已入库可直接读（`falco/official-rules/`）；TSA 为其中 86 条官方规则配了扣分权重；
+- Falco（实测 0.44.x，modern eBPF 主机版驱动；部署脚本兼容会改 `rules_files`/输出配置的多个 Falco 版本，见 [docs/INSTALL.md](docs/INSTALL.md) §7）；
+- 检测规则 = Falco 官方规则集 + 1 条自定义文件监控规则（`falco/rules.d/`）；官方规则快照已入库可直接读（`falco/official-rules/`）；TSA 为其中 86 条官方规则配了扣分权重；
 - BPF 策略用 YAML 配置，默认 `audit` 模式；
 - TSA 用 SQLite 持久化，支持去重、限速、风险过期、重启恢复；
 - Web 看板每 2 秒刷新服务状态、策略、评分和事件证据链；
@@ -78,7 +81,7 @@ echo test | sudo tee -a /etc/tsa-protected-demo >/dev/null
 
 ## 5. 快速使用
 
-跑下面的部署脚本前，先 clone 本仓库，装好 Falco（modern eBPF）和 Go 1.23。从空白机器开始的话，先看 [docs/INSTALL.md](docs/INSTALL.md) 从零装前置，否则部署会失败。
+跑下面的部署脚本前，先 clone 本仓库，装好 Falco（modern eBPF）和 Go 1.25。从空白机器开始的话，先看 [docs/INSTALL.md](docs/INSTALL.md) 从零装前置，否则部署会失败。
 
 ```bash
 sudo ./deploy-security-stack.sh
