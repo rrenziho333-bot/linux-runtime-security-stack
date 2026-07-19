@@ -434,7 +434,32 @@ TSA 的 `tsa/policy_config.yaml` 里 `specific_rules` 为这 93 条中的 86 条
 > - 老的 `falco.yaml` 把 `falco-sandbox_rules.yaml`/`falco-incubating_rules.yaml` 列进 `rules_files`，Falco 0.44 默认不再列。`deploy-host-falco.sh` 会探测并把磁盘上实际存在的规则文件以正确顺序重排进 `rules_files`，不会硬匹配某个固定布局。
 > - `95-security-stack-exceptions.yaml` 用 `append` 给两个官方符号（`bpf_profiled_binaries`、`user_known_write_below_root_activities`）加白名单，但 Falco 0.44 已删这两个符号，`append` 一个不存在的符号会让 Falco 启动失败。部署时脚本会探测这些符号在不在本机官方规则里，不在的整段剥离、不报错。
 > - 老的 `json_output` 是 map（`enabled: true`），0.44 拍平成 scalar（`json_output: true`）。脚本探测形态生成匹配的 override。
-> 上面写"93 条/86 条"是项目实现的参考量级，**以你机器实际安装的 Falco 版本为准**——想看本机确切条数，跑 `grep -c '^- rule:' /etc/falco/falco_rules.yaml`。
+> 上面写"93 条/86 条"是项目实现的参考量级，**以你机器实际安装的 Falco 版本为准**——想看本机确切条数，把 `rules_files` 实际加载的每个文件数一遍：
+
+```bash
+sed -n '/^rules_files:/,/^[a-z]/p' /etc/falco/falco.yaml | grep '  -'    # 看加载了哪些
+grep -c '^- rule:' /etc/falco/falco_rules.yaml /etc/falco/falco-sandbox_rules.yaml /etc/falco/falco-incubating_rules.yaml 2>/dev/null
+```
+
+### 7.1 启用全量 90+ 官方规则（可选）
+
+Falco 包默认只装 Stable 主规则文件（`falco_rules.yaml`，约 25 条）。Sandbox（`falco-sandbox_rules.yaml`，实验性）和 Incubating（`falco-incubating_rules.yaml`，孵化中）默认不装，所以开箱只生效 25 条。要 93 条全量生效，把这两个文件补到 `/etc/falco/` 再重部署——仓库已入库一份与 Falco 0.44 实测兼容的全量快照，直接用：
+
+```bash
+cd ~/linux-runtime-security-stack    # 或你的项目目录
+sudo cp falco/official-rules/falco-sandbox_rules.yaml /etc/falco/
+sudo cp falco/official-rules/falco-incubating_rules.yaml /etc/falco/
+sudo ./deploy-security-stack.sh       # rules_files 会自动补上这两个文件
+```
+
+部署后确认生效：
+```bash
+sed -n '/^rules_files:/,/^[a-z]/p' /etc/falco/falco.yaml | grep '  -'   # 应含 sandbox + incubating
+grep -c '^- rule:' /etc/falco/falco_rules.yaml /etc/falco/falco-sandbox_rules.yaml /etc/falco/falco-incubating_rules.yaml
+# 25 + 37 + 31 = 93 条
+```
+
+> 仓库快照是某 Falco 版本下入库的全量规则，**已实测与 Falco 0.44 兼容**（`falco --dry-run` 通过）。若你装的 Falco 版本与快照差异较大、`falco --dry-run` 报规则语法不兼容，回滚（删掉这两个文件重部署），改从 `https://github.com/falcosecurity/rules/releases` 下与你的 Falco 对齐的 release 全量包，用 `falco/fetch-official-rules.sh --remote-url <tarball-url>` 拉取后再 copy。
 
 ## 8. 一览检查清单
 

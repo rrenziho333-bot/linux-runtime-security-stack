@@ -151,7 +151,7 @@ cat ~/linux-runtime-security-stack/falco/rules.d/90-local-file-monitoring.yaml
 grep -A8 '^- rule: Write below etc' /etc/falco/falco_rules.yaml     # 例：看"写 /etc"那条
 ```
 
-> 仓库 `falco/official-rules/` 里是 93 条官方规则的可读快照，clone 后直接看，不参与运行。要和本机已装 Falco 版本对齐，用 `falco/fetch-official-rules.sh` 重新拉取（见 [INSTALL.md](INSTALL.md) §10）。
+> 仓库 `falco/official-rules/` 里是 93 条官方规则的可读快照，clone 后直接看，不参与运行。要和本机已装 Falco 版本对齐，用 `falco/fetch-official-rules.sh` 重新拉取（见 [INSTALL.md](INSTALL.md) §10）。默认只 25 条生效想开全量 93 条见 [INSTALL.md](INSTALL.md) §7.1。
 
 浏览器看板 `http://127.0.0.1:8766/`：流水线区 Falco/TSA 绿色 active、风险评分区有数值、证据链区出现刚才 `tee` 写 `/etc/tsa-protected-demo` 的事件——也齐了。
 
