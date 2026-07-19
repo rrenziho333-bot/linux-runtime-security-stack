@@ -29,8 +29,8 @@ ls /sys/kernel/btf/vmlinux    # 必须存在（Falco modern eBPF 强依赖内核
 ## 2. 部署（监测机）
 
 ```bash
-git clone https://github.com/rrenziho333-bot/linux-runtime-security-stack.git ~/lrss
-cd ~/lrss
+git clone https://github.com/rrenziho333-bot/linux-runtime-security-stack.git ~/linux-runtime-security-stack
+cd ~/linux-runtime-security-stack
 /usr/local/go/bin/go env -w GOPROXY=https://goproxy.cn,direct   # 国内拉 Go 模块走代理
 /usr/local/go/bin/go mod download
 sudo ./deploy-security-stack.sh

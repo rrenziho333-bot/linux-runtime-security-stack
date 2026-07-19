@@ -48,9 +48,9 @@ run_as_builder() {
     "$@"
 }
 
-# Render a template systemd unit (with __RUNTIME_USER__ / __SRC_DIR__ /
-# __SRC_DOCS__ placeholders) into a temporary file using the actual runtime
-# user and project directory. The caller installs the returned temporary file.
+# Render a template systemd unit (with __RUNTIME_USER__ / __SRC_DIR__
+# placeholders) into a temporary file using the actual runtime user and
+# project directory. The caller installs the returned temporary file.
 render_unit() {
   local source_unit="$1"
   local rendered
@@ -58,7 +58,6 @@ render_unit() {
   sed \
     -e "s#__RUNTIME_USER__#${RUNTIME_USER}#g" \
     -e "s#__SRC_DIR__#${ROOT_DIR}#g" \
-    -e "s#__SRC_DOCS__#${ROOT_DIR}/SECURITY_STACK.md#g" \
     "${source_unit}" >"${rendered}"
   if grep -q '__[A-Z_]*__' "${rendered}"; then
     rm -f "${rendered}"
