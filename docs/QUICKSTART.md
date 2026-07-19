@@ -114,6 +114,8 @@ echo "自定义规则文件:"; ls /etc/falco/rules.d/
 | 分数 | `runtime` 低于 100（Falco 扣 5 + BPF 扣 2），`final = posture×0.4 + runtime×0.6` | `runtime` 低于 100（扣 5），`final` 同公式 |
 | 规则统计 | 官方规则数有值；自定义文件含 `90-local-file-monitoring.yaml`、`95-security-stack-exceptions.yaml` | 同左 |
 
+> "官方规则数"是本机 Falco 版本实际带的规则条数，Falco 0.44.x 主规则文件约 25 条；老版本算上 sandbox/incubating 可达 90+。**有数即可**，具体多少取决于你装的 Falco 版本（见 [INSTALL.md](INSTALL.md) §7）。
+
 浏览器看板 `http://127.0.0.1:8766/`：流水线区 Falco/TSA 绿色 active、风险评分区有数值、证据链区出现刚才 `tee` 写 `/etc/tsa-protected-demo` 的事件——也齐了。
 
 任一层不对，对照 [INSTALL.md](INSTALL.md) §6 的四步验证排。
