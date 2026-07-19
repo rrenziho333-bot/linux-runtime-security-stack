@@ -116,6 +116,43 @@ echo "自定义规则文件:"; ls /etc/falco/rules.d/
 
 > "官方规则数"是本机 Falco 版本实际带的规则条数，Falco 0.44.x 主规则文件约 25 条；老版本算上 sandbox/incubating 可达 90+。**有数即可**，具体多少取决于你装的 Falco 版本（见 [INSTALL.md](INSTALL.md) §7）。
 
+### 规则文件在哪、多少条、怎么数
+
+| 规则类型 | 仓库源（可改） | 部署后实际生效位置 |
+|---|---|---|
+| 官方规则 | （来自你装的 Falco 包，不在仓库） | `/etc/falco/falco_rules.yaml`（+ `falco-sandbox_rules.yaml`、`falco-incubating_rules.yaml`，看 Falco 装没装这俩）|
+| 自定义规则 | `falco/rules.d/90-local-file-monitoring.yaml` | `/etc/falco/rules.d/90-local-file-monitoring.yaml`（部署脚本 copy 过去）|
+| 白名单补丁 | `falco/rules.d/95-security-stack-exceptions.yaml` | `/etc/falco/rules.d/95-security-stack-exceptions.yaml`（部署时按本机符号剥离失效段）|
+| 官方规则阅读快照 | `falco/official-rules/`（25+37+31=93 条全量，只供分析不参与运行）| — |
+
+数本机真正生效的规则：
+
+```bash
+# 看 rules_files 实际加载了哪些文件(决定哪些规则生效)
+sed -n '/^rules_files:/,/^[a-z]/p' /etc/falco/falco.yaml | grep '  -'
+
+# 把上面列出的每个文件数一遍,加起来就是生效规则数
+grep -c '^- rule:' /etc/falco/falco_rules.yaml
+grep -c '^- rule:' /etc/falco/falco-sandbox_rules.yaml 2>/dev/null
+grep -c '^- rule:' /etc/falco/falco-incubating_rules.yaml 2>/dev/null
+
+# 列出本机所有生效规则名
+grep -h '^- rule:' /etc/falco/falco_rules.yaml /etc/falco/rules.d/*.yaml | sed 's/^- rule: //'
+```
+
+你想看/改某条规则本身：
+
+```bash
+# 自定义规则(改后 sudo ./deploy-security-stack.sh 重新部署生效)
+ls ~/linux-runtime-security-stack/falco/rules.d/
+cat ~/linux-runtime-security-stack/falco/rules.d/90-local-file-monitoring.yaml
+
+# 官方规则(只读,改动会被 Falco 包升级覆盖)
+grep -A8 '^- rule: Write below etc' /etc/falco/falco_rules.yaml     # 例：看"写 /etc"那条
+```
+
+> 仓库 `falco/official-rules/` 里是 93 条官方规则的可读快照，clone 后直接看，不参与运行。要和本机已装 Falco 版本对齐，用 `falco/fetch-official-rules.sh` 重新拉取（见 [INSTALL.md](INSTALL.md) §10）。
+
 浏览器看板 `http://127.0.0.1:8766/`：流水线区 Falco/TSA 绿色 active、风险评分区有数值、证据链区出现刚才 `tee` 写 `/etc/tsa-protected-demo` 的事件——也齐了。
 
 任一层不对，对照 [INSTALL.md](INSTALL.md) §6 的四步验证排。
