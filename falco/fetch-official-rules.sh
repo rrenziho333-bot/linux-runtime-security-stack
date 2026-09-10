@@ -80,12 +80,13 @@ fetch_remote_tar() {
   tmpdir="$(mktemp -d)"
   tarball="${tmpdir}/rules.tar.gz"
   echo "Downloading ${REMOTE_URL}"
-  if ! curl -fsSL "${REMOTE_URL}" -o "${tarball}"; then
+  if ! curl -fsSL --max-filesize 67108864 "${REMOTE_URL}" -o "${tarball}"; then
     echo "Download failed. Verify the URL points to a .tar.gz asset." >&2
     rm -rf "${tmpdir}"
     exit 1
   fi
-  tar -xzf "${tarball}" -C "${tmpdir}"
+  # Read only allowlisted regular members; never extract archive paths or links.
+  python3 "${SCRIPT_DIR}/extract_rule_snapshot.py" "${tarball}" "${tmpdir}"
   echo "Extracting official rules:"
   for f in "${FILES[@]}"; do
     local src
@@ -104,8 +105,12 @@ fetch_remote_tar() {
 
 fetch_remote_yaml() {
   [[ -n ${REMOTE_URL} && -n ${REMOTE_FILE} ]] || usage
+  case "${REMOTE_FILE}" in
+    falco_rules.yaml|falco-sandbox_rules.yaml|falco-incubating_rules.yaml) ;;
+    *) echo "Unsupported official rule filename: ${REMOTE_FILE}" >&2; exit 1 ;;
+  esac
   echo "Downloading ${REMOTE_FILE} from ${REMOTE_URL}"
-  if ! curl -fsSL "${REMOTE_URL}" -o "${DEST_DIR}/${REMOTE_FILE}"; then
+  if ! curl -fsSL --max-filesize 20971520 "${REMOTE_URL}" -o "${DEST_DIR}/${REMOTE_FILE}"; then
     echo "Download failed for ${REMOTE_URL}" >&2
     exit 1
   fi

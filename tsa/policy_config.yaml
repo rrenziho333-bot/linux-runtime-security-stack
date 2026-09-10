@@ -38,12 +38,6 @@ bpf_lsm:
     max_points_per_minute: 10
     risk_ttl_seconds: 3600
 
-  whitelist:
-    proc_names:
-      - falcoctl
-    users: []
-    paths_prefix: []
-
 # --- 1. 静态姿态检查 (Posture: 基线与配置) ---
 
 baseline_lynis:
@@ -53,6 +47,8 @@ baseline_lynis:
   run_lynis: false
   lynis_cmd: "lynis audit system --quick --quiet"
   report_path: "reports/lynis-report.dat"
+  interval_seconds: 300
+  max_report_age_seconds: 86400
 
   # 评分策略：默认只扣 warnings（建议先这样，最稳）
   scoring_mode: "warnings_only"   # 可选: warnings_only | warnings_and_selected_suggestions
@@ -90,6 +86,9 @@ baseline_lynis:
 
 runtime_rules:
   enabled: true
+  # Narrow exemptions belong in Falco rules; broad process-name exemptions can
+  # hide malicious programs that rename themselves to a trusted process name.
+  whitelist: {proc_names: [], users: [], paths_prefix: []}
   log_path: "/var/log/falco/falco.json"
   start_at_end: true
   poll_interval: 1

@@ -8,13 +8,17 @@ fi
 
 ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 GO_BIN="/usr/local/go/bin/go"
-if [[ -z ${SUDO_USER} ]]; then
+if [[ -z ${SUDO_USER:-} || ${SUDO_USER} == root ]]; then
   echo "Could not determine the runtime user: SUDO_USER is unset." >&2
   echo "Run this script with: sudo ${0}" >&2
   exit 1
 fi
 BUILD_USER="${SUDO_USER}"
 RUNTIME_USER="${SUDO_USER}"
+if [[ ! ${ROOT_DIR} =~ ^/[a-zA-Z0-9_./-]+$ ]]; then
+  echo "Use a checkout path containing only letters, digits, /, _, -, and . for systemd deployment." >&2
+  exit 1
+fi
 BUILD_HOME="$(getent passwd "${BUILD_USER}" | cut -d: -f6)"
 BUILD_OUTPUT="${ROOT_DIR}/bpf-lsm-controller"
 TSA_DIR="${ROOT_DIR}/tsa"
@@ -58,6 +62,7 @@ render_unit() {
   sed \
     -e "s#__RUNTIME_USER__#${RUNTIME_USER}#g" \
     -e "s#__SRC_DIR__#${ROOT_DIR}#g" \
+    -e "s#__BPF_LSM_MODE__#${BPF_LSM_MODE}#g" \
     "${source_unit}" >"${rendered}"
   if grep -q '__[A-Z_]*__' "${rendered}"; then
     rm -f "${rendered}"
@@ -65,24 +70,6 @@ render_unit() {
     exit 1
   fi
   printf '%s' "${rendered}"
-}
-
-# Open the dashboard port (8766) so other hosts can reach the score API and
-# dashboard. Best-effort: silently no-op if neither firewalld nor ufw is present.
-DASHBOARD_PORT=8766
-open_dashboard_port() {
-  if systemctl is-active --quiet firewalld 2>/dev/null; then
-    firewall-cmd --add-port="${DASHBOARD_PORT}/tcp" --permanent >/dev/null 2>&1 \
-      && firewall-cmd --reload >/dev/null 2>&1 \
-      && echo "Opened ${DASHBOARD_PORT}/tcp in firewalld."
-    return
-  fi
-  if command -v ufw >/dev/null 2>&1 && ufw status >/dev/null 2>&1; then
-    ufw allow "${DASHBOARD_PORT}/tcp" >/dev/null 2>&1 \
-      && echo "Opened ${DASHBOARD_PORT}/tcp in ufw."
-    return
-  fi
-  echo "No firewalld/ufw detected; ensure ${DASHBOARD_PORT}/tcp is reachable manually if needed."
 }
 
 # Detect whether the running kernel supports BPF LSM. Falco's modern eBPF
@@ -96,8 +83,10 @@ bpf_lsm_available() {
 
 if bpf_lsm_available; then
   BPF_LSM_AVAILABLE=1
+  BPF_LSM_MODE=enabled
 else
   BPF_LSM_AVAILABLE=0
+  BPF_LSM_MODE=disabled
 fi
 
 cd "${ROOT_DIR}"
@@ -114,7 +103,7 @@ fi
 if [[ ${BPF_LSM_AVAILABLE} -eq 1 ]]; then
   # Full mode: Go toolchain is required to build the bpf-lsm-controller binary.
   if [[ ! -x ${GO_BIN} ]]; then
-    echo "Full mode needs the Go toolchain at ${GO_BIN} (install Go 1.23, see docs/INSTALL.md §3)." >&2
+    echo "Full mode needs the Go toolchain at ${GO_BIN} (install Go 1.25, see docs/INSTALL.md §3)." >&2
     exit 1
   fi
   run_as_builder "${GO_BIN}" test ./...
@@ -125,8 +114,10 @@ else
 fi
 
 # TSA is Python only; its tests run in both modes.
-runuser -u "${BUILD_USER}" -- sh -c \
-  "cd '${TSA_DIR}' && python3 -m unittest discover -s tests -v"
+(
+  cd "${TSA_DIR}"
+  runuser -u "${BUILD_USER}" -- python3 -m unittest discover -s tests -v
+)
 
 "${ROOT_DIR}/falco/deploy-host-falco.sh"
 
@@ -154,11 +145,8 @@ else
   # log so the fusion pipeline runs on Falco only.
   echo "BPF LSM not available on this kernel — deploying in detection-only mode."
   echo "  (bpf-lsm-controller is skipped; Falco + TSA + dashboard remain active.)"
-  if grep -q '^bpf_lsm:' "${TSA_DIR}/policy_config.yaml"; then
-    awk 'prev=="bpf_lsm:" && $0~/^[[:space:]]*enabled: true[[:space:]]*$/ \
-           {$0="  enabled: false"} {prev=$1; print}' \
-      "${TSA_DIR}/policy_config.yaml" > "${TSA_DIR}/policy_config.yaml.tmp" \
-      && mv "${TSA_DIR}/policy_config.yaml.tmp" "${TSA_DIR}/policy_config.yaml"
+  if systemctl cat bpf-lsm-controller.service >/dev/null 2>&1; then
+    systemctl disable --now bpf-lsm-controller.service
   fi
 fi
 
@@ -177,8 +165,6 @@ pkill -u "${BUILD_USER}" -f \
   "^python3 ${TSA_DIR}/tsa_dashboard.py .*--port 8766$" || true
 
 systemctl daemon-reload
-# Let other hosts reach the dashboard / score API (binds 0.0.0.0:8766).
-open_dashboard_port
 if [[ ${BPF_LSM_AVAILABLE} -eq 1 ]]; then
   systemctl enable bpf-lsm-controller.service
   systemctl restart bpf-lsm-controller.service
@@ -196,9 +182,9 @@ systemctl --no-pager --full status tsa-dashboard.service
 
 echo
 if [[ ${BPF_LSM_AVAILABLE} -eq 1 ]]; then
-  echo "Security stack deployed. BPF LSM policy mode remains AUDIT."
+  echo "Security stack deployed. BPF LSM uses the modes configured in policy.yaml."
 else
   echo "Security stack deployed in DETECTION-ONLY mode (no BPF LSM enforcement)."
 fi
-echo "Dashboard: http://127.0.0.1:8766/  (other hosts: http://<this-host-ip>:8766/)"
-echo "Risk score API:  GET http://<this-host-ip>:8766/systemManage/risk/score"
+echo "Dashboard: http://127.0.0.1:8766/ (loopback only; use SSH forwarding or an authenticated TLS proxy)"
+echo "Risk score API: GET http://127.0.0.1:8766/systemManage/risk/score"

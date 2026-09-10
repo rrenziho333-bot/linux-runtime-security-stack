@@ -5,6 +5,9 @@
 
 #define MAY_WRITE 0x2
 #define EPERM 1
+#define PROT_WRITE 0x2
+#define MAP_SHARED 0x01
+#define VM_SHARED 0x00000008
 
 #define POLICY_MODE_AUDIT 1
 #define POLICY_MODE_ENFORCE 2
@@ -17,6 +20,8 @@
 #define OPERATION_RENAME_SOURCE 3
 #define OPERATION_RENAME_TARGET 4
 #define OPERATION_SETATTR 5
+#define OPERATION_MMAP_WRITE 6
+#define OPERATION_MPROTECT_WRITE 7
 
 #define STAT_FILE_PERMISSION 0
 #define STAT_INODE_UNLINK 1
@@ -29,7 +34,9 @@
 #define STAT_AUDIT_EVENT 8
 #define STAT_DENY_EVENT 9
 #define STAT_RINGBUF_DROPPED 10
-#define STAT_MAX 11
+#define STAT_MMAP_FILE 11
+#define STAT_FILE_MPROTECT 12
+#define STAT_MAX 13
 
 struct object_key {
     __u64 device;
@@ -276,4 +283,36 @@ int BPF_PROG(
     increment_stat(STAT_INODE_SETATTR);
     inode = BPF_CORE_READ(dentry, d_inode);
     return evaluate_inode(inode, 0, OPERATION_SETATTR);
+}
+
+SEC("lsm/mmap_file")
+int BPF_PROG(handle_mmap_file, struct file *file, unsigned long reqprot,
+             unsigned long prot, unsigned long flags, int ret)
+{
+    if (ret != 0)
+        return ret;
+    /* MAP_SHARED_VALIDATE also contains the MAP_SHARED bit. */
+    if (!file || !(prot & PROT_WRITE) || !(flags & MAP_SHARED))
+        return 0;
+    increment_stat(STAT_MMAP_FILE);
+    return evaluate_inode(BPF_CORE_READ(file, f_inode), MAY_WRITE,
+                          OPERATION_MMAP_WRITE);
+}
+
+SEC("lsm/file_mprotect")
+int BPF_PROG(handle_file_mprotect, struct vm_area_struct *vma,
+             unsigned long reqprot, unsigned long prot, int ret)
+{
+    struct file *file;
+
+    if (ret != 0)
+        return ret;
+    if (!(prot & PROT_WRITE) || !(BPF_CORE_READ(vma, vm_flags) & VM_SHARED))
+        return 0;
+    file = BPF_CORE_READ(vma, vm_file);
+    if (!file)
+        return 0;
+    increment_stat(STAT_FILE_MPROTECT);
+    return evaluate_inode(BPF_CORE_READ(file, f_inode), MAY_WRITE,
+                          OPERATION_MPROTECT_WRITE);
 }

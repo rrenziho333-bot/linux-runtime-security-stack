@@ -4,10 +4,13 @@
 from __future__ import annotations
 
 import argparse
+import ipaddress
 import json
+import logging
 import sqlite3
 import subprocess
 import time
+from contextlib import closing
 from datetime import datetime, timezone
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -37,6 +40,7 @@ HTML = r"""<!doctype html>
       box-shadow:0 12px 30px rgba(0,0,0,.18)}.scores{grid-column:span 4}.pipeline{grid-column:span 8}
     .policies{grid-column:span 4}.events{grid-column:span 8}.score-row{display:flex;gap:13px}
     .score{flex:1;border:1px solid var(--line);border-radius:12px;padding:13px}.score strong{display:block;font-size:28px}
+    .score strong.unknown{font-size:16px;overflow-wrap:anywhere}
     .stages{display:flex;align-items:stretch;gap:7px}.stage{flex:1;padding:11px;border:1px solid var(--line);
       border-radius:10px;min-width:0}.stage.ok{border-color:#28755e}.stage.bad{border-color:#7c3442}.arrow{align-self:center;color:var(--muted)}
     .badge{display:inline-block;border-radius:99px;padding:2px 8px;font-size:12px;border:1px solid var(--line)}
@@ -69,7 +73,7 @@ const esc=v=>String(v??"");
 function el(tag,cls,text){const n=document.createElement(tag);if(cls)n.className=cls;if(text!==undefined)n.textContent=esc(text);return n}
 function renderScore(data){const root=document.querySelector("#scores");root.replaceChildren();
   [["最终",data.final],["基线",data.posture],["运行时",data.runtime]].forEach(([name,val])=>{
-    const box=el("div","score");box.append(el("span","muted",name),el("strong","",Number(val).toFixed(1)));root.append(box)})}
+    const box=el("div","score");box.append(el("span","muted",name),el("strong",val==null?"unknown":"",val==null?"未评估":Number(val).toFixed(1)));root.append(box)})}
 function renderPipeline(stages){const root=document.querySelector("#pipeline");root.replaceChildren();
   stages.forEach((s,i)=>{const box=el("div","stage "+(s.active?"ok":"bad"));box.append(el("strong","",s.name),
     el("div",s.active?"oktxt":"muted",s.status),el("small","muted",s.detail));root.append(box);
@@ -91,8 +95,8 @@ function renderEvents(items){const root=document.querySelector("#events");root.r
 async function refresh(){try{const r=await fetch("/api/status",{cache:"no-store"});if(!r.ok)throw Error("HTTP "+r.status);
   const d=await r.json();renderScore(d.scores);renderPipeline(d.pipeline);renderPolicies(d.policies);renderEvents(d.incidents);
   document.querySelector("#refresh").textContent="已更新 "+new Date(d.generated_time).toLocaleTimeString();
-  document.querySelector("#error").replaceChildren()}catch(e){const box=el("div","error","读取看板数据失败："+e.message);
-  document.querySelector("#error").replaceChildren(box);document.querySelector("#refresh").textContent="连接异常"}}
+  document.querySelector("#error").replaceChildren();if(!d.availability.ready)document.querySelector("#error").append(el("div","error",d.availability.reason))}catch(e){const box=el("div","error","读取看板数据失败："+e.message);
+  renderScore({final:null,posture:null,runtime:null});document.querySelector("#error").replaceChildren(box);document.querySelector("#refresh").textContent="连接异常"}}
 refresh();setInterval(refresh,2000);
 </script></body></html>"""
 
@@ -135,7 +139,7 @@ class DashboardData:
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(
-            f"file:{self.state_db}?mode=ro", uri=True, timeout=2
+            self.state_db.resolve().as_uri() + "?mode=ro", uri=True, timeout=2
         )
         connection.row_factory = sqlite3.Row
         return connection
@@ -181,7 +185,7 @@ class DashboardData:
 
     def _scores(
         self, db: sqlite3.Connection, state: Mapping[str, Any]
-    ) -> Dict[str, float]:
+    ) -> Dict[str, Optional[float]]:
         now = time.time()
         controls = (
             (self.config.get("runtime_rules", {}) or {}).get("event_control", {}) or {}
@@ -201,13 +205,49 @@ class DashboardData:
             for row in rows
         )
         runtime = float(max(0, 100 - min(100, active)))
-        posture = float(state.get("posture_score", 100))
+        posture_value = state.get("posture_score")
+        posture = float(posture_value) if posture_value is not None else None
         weights = (self.config.get("scoring", {}) or {}).get("weights", {}) or {}
         posture_weight = max(0.0, float(weights.get("posture", 0.4)))
         runtime_weight = max(0.0, float(weights.get("runtime", 0.6)))
-        total = posture_weight + runtime_weight or 1.0
-        final = (posture * posture_weight + runtime * runtime_weight) / total
-        return {"final": round(final, 2), "posture": posture, "runtime": runtime}
+        total = posture_weight + runtime_weight
+        if total == 0:
+            posture_weight, runtime_weight, total = 0.4, 0.6, 1.0
+        final = None if posture is None and posture_weight else round(
+            ((posture or 0) * posture_weight + runtime * runtime_weight) / total, 2
+        )
+        return {"final": final, "posture": posture, "runtime": runtime}
+
+    def _availability(self, state: Mapping[str, Any]) -> Dict[str, Any]:
+        heartbeat = float(state.get("fusion_heartbeat", 0))
+        age = time.time() - heartbeat
+        reasons = []
+        if state.get("fusion_status") != "running" or not 0 <= age <= 30:
+            reasons.append("TSA heartbeat is missing or stale")
+        if service_state("tsa-fusion.service") != "active":
+            reasons.append("tsa-fusion.service is not active")
+        for key, service in (("runtime_rules", "falco-modern-bpf.service"),
+                             ("bpf_lsm", "bpf-lsm-controller.service")):
+            enabled = state.get("enabled_sources", {}).get(
+                key, (self.config.get(key, {}) or {}).get("enabled", key == "runtime_rules")
+            )
+            if enabled:
+                if service_state(service) != "active":
+                    reasons.append(f"{service} is not active")
+                source = "falco" if key == "runtime_rules" else "bpf_lsm"
+                if not state.get("source_status", {}).get(source, False):
+                    reasons.append(f"{source} event log is unavailable")
+        runtime_ready = not reasons
+        baseline = state.get("baseline_status", "unavailable")
+        weights = (self.config.get("scoring", {}) or {}).get("weights", {}) or {}
+        needs_baseline = float(weights.get("posture", 0.4)) > 0 or not any(
+            float(weights.get(key, default)) > 0 for key, default in
+            (("posture", 0.4), ("runtime", 0.6))
+        )
+        if needs_baseline and (baseline not in ("ok", "disabled") or state.get("posture_score") is None):
+            reasons.append("Lynis baseline is unavailable")
+        return {"ready": not reasons, "runtime_ready": runtime_ready, "reason": "; ".join(reasons),
+                "baseline_status": baseline, "heartbeat": heartbeat or None}
 
     def _policies(self) -> List[Dict[str, Any]]:
         try:
@@ -276,7 +316,7 @@ class DashboardData:
                 same_path = str(candidate.get("file", "")) in policy_paths.get(
                     str(event.get("policy_name", "")), set()
                 )
-                if same_pid or (same_process and same_path):
+                if same_pid or (not candidate_pid and same_process and same_path):
                     match = candidate
                     match_basis = (
                         "PID + 时间"
@@ -353,17 +393,25 @@ class DashboardData:
             incident.pop("_timestamp", None)
         return incidents[:30]
 
-    def scores(self) -> Dict[str, float]:
+    def scores(self) -> Dict[str, Optional[float]]:
         """Return only the current risk scores (lighter than snapshot())."""
-        with self._connect() as db:
+        with closing(self._connect()) as db:
             state = self._state(db)
+            availability = self._availability(state)
+            if not availability["ready"]:
+                raise ValueError(availability["reason"])
             return self._scores(db, state)
 
     def snapshot(self) -> Dict[str, Any]:
-        with self._connect() as db:
+        with closing(self._connect()) as db:
             state = self._state(db)
             events = self._events(db)
             scores = self._scores(db, state)
+        availability = self._availability(state)
+        if not availability["ready"]:
+            scores["final"] = None
+        if not availability["runtime_ready"]:
+            scores["runtime"] = None
         policies = self._policies()
         states = {
             "falco": service_state("falco-modern-bpf.service"),
@@ -400,6 +448,7 @@ class DashboardData:
         return {
             "generated_time": utc_now(),
             "scores": scores,
+            "availability": availability,
             "pipeline": pipeline,
             "policies": policies,
             "incidents": self._incidents(events),
@@ -429,12 +478,25 @@ class DashboardHandler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_GET(self) -> None:
+        # Reject DNS-rebinding requests directed at this loopback-only service.
+        try:
+            host = urlparse("//" + self.headers.get("Host", "")).hostname
+        except ValueError:
+            host = None
+        if not is_loopback_host(host):
+            self._send(b'{"error":"invalid host"}', "application/json", HTTPStatus.FORBIDDEN)
+            return
         path = urlparse(self.path).path
         if path == "/":
             self._send(HTML.encode("utf-8"), "text/html; charset=utf-8")
             return
         if path == "/healthz":
-            self._send(b'{"status":"ok"}', "application/json")
+            try:
+                self.server.data.scores()  # type: ignore[attr-defined]
+                self._send(b'{"status":"ok"}', "application/json")
+            except (OSError, sqlite3.Error, ValueError):
+                self._send(b'{"status":"unavailable"}', "application/json",
+                           HTTPStatus.SERVICE_UNAVAILABLE)
             return
         if path == "/api/status":
             try:
@@ -442,8 +504,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 body = json.dumps(snapshot, ensure_ascii=False).encode("utf-8")
                 self._send(body, "application/json; charset=utf-8")
             except (OSError, sqlite3.Error, ValueError) as error:
+                logging.warning("Dashboard snapshot unavailable: %s", error)
                 body = json.dumps(
-                    {"error": str(error)}, ensure_ascii=False
+                    {"error": "Security data unavailable"}, ensure_ascii=False
                 ).encode("utf-8")
                 self._send(
                     body,
@@ -470,11 +533,12 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 body = json.dumps(envelope, ensure_ascii=False).encode("utf-8")
                 self._send(body, "application/json; charset=utf-8")
             except (OSError, sqlite3.Error, ValueError) as error:
+                logging.warning("Risk score unavailable: %s", error)
                 body = json.dumps(
                     {
                         "code": 50000,
                         "status": False,
-                        "message": f"查询失败: {error}",
+                        "message": "安全数据不可用或已过期",
                         "data": None,
                     },
                     ensure_ascii=False,
@@ -486,6 +550,28 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 )
             return
         self._send(b'{"error":"not found"}', "application/json", HTTPStatus.NOT_FOUND)
+
+
+def is_loopback_host(host: Optional[str]) -> bool:
+    if host == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host or "").is_loopback
+    except ValueError:
+        return False
+
+
+class DashboardServer(ThreadingHTTPServer):
+    def server_bind(self) -> None:
+        address = ipaddress.ip_address(self.server_address[0])
+        if not address.is_loopback:
+            raise ValueError("Dashboard must bind to loopback; use an authenticated TLS reverse proxy or SSH tunnel")
+        super().server_bind()
+
+    def get_request(self):
+        connection, address = super().get_request()
+        connection.settimeout(5)
+        return connection, address
 
 
 def parse_args() -> argparse.Namespace:
@@ -505,7 +591,7 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
-    server = ThreadingHTTPServer(
+    server = DashboardServer(
         (args.bind, args.port),
         DashboardHandler,
     )

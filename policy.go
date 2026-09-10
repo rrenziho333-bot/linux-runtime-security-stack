@@ -1,7 +1,9 @@
 package main
 
 import (
+	"bytes"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -19,11 +21,13 @@ const (
 	actionAudit uint32 = 1
 	actionDeny  uint32 = 2
 
-	operationWrite        uint32 = 1
-	operationUnlink       uint32 = 2
-	operationRenameSource uint32 = 3
-	operationRenameTarget uint32 = 4
-	operationSetattr      uint32 = 5
+	operationWrite         uint32 = 1
+	operationUnlink        uint32 = 2
+	operationRenameSource  uint32 = 3
+	operationRenameTarget  uint32 = 4
+	operationSetattr       uint32 = 5
+	operationMmapWrite     uint32 = 6
+	operationMprotectWrite uint32 = 7
 )
 
 type policyConfig struct {
@@ -96,8 +100,14 @@ func loadPolicyConfig(path string) (policyConfig, error) {
 		return policyConfig{}, err
 	}
 	var config policyConfig
-	if err := yaml.Unmarshal(data, &config); err != nil {
+	decoder := yaml.NewDecoder(bytes.NewReader(data))
+	decoder.KnownFields(true)
+	if err := decoder.Decode(&config); err != nil {
 		return policyConfig{}, err
+	}
+	var extra interface{}
+	if err := decoder.Decode(&extra); err != io.EOF {
+		return policyConfig{}, fmt.Errorf("policy must contain exactly one YAML document")
 	}
 	if config.Version != 1 {
 		return policyConfig{}, fmt.Errorf("unsupported policy version %d", config.Version)
@@ -147,6 +157,9 @@ func kernelDeviceID(userspaceDevice uint64) (uint64, error) {
 func preparePolicyEntries(
 	config policyConfig,
 ) (preparedPolicies, map[uint32]string, error) {
+	if len(config.Policies) == 0 {
+		return preparedPolicies{}, nil, fmt.Errorf("at least one file protection policy is required")
+	}
 	now, err := monotonicNowNS()
 	if err != nil {
 		return preparedPolicies{}, nil, err
@@ -214,6 +227,9 @@ func preparePolicyEntries(
 					cleanPath,
 					err,
 				)
+			}
+			if !info.Mode().IsRegular() {
+				return preparedPolicies{}, nil, fmt.Errorf("policy path must be an existing regular file: %s", cleanPath)
 			}
 			stat, ok := info.Sys().(*syscall.Stat_t)
 			if !ok {

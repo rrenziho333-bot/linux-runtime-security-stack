@@ -1,165 +1,91 @@
-# 快速验证（5 步）
+# 快速部署与验证
 
-从空白 Linux 到"别人 curl 拿到分数"。只敲命令、看输出就行，原理看 [INSTALL.md](INSTALL.md)。
+本指南适用于安全加固后的版本。已部署旧版本时先读 [升级说明](SECURITY_REVIEW.md)。看板仅监听回环地址；没有真实基线输入时不会默认给出安全满分。
 
-> 发行版：Ubuntu 22.04+ 或 CentOS 8/Stream 9+。CentOS 7 不行（内核太旧）。
-> Go 要 1.25（不是 1.23）：项目的 `go.mod` 要求 `go 1.25`，直接装 1.25 最省事，部署时工具链不会再自动下载。
+## 1. 准备 Linux
 
-## 1. 装前置（监测机，一次性）
+在 x86_64 Linux 上按 [INSTALL.md](INSTALL.md) 安装 Falco、Python 3、PyYAML；完整 BPF 模式还需要 `/usr/local/go/bin/go`，版本满足 go.mod（至少 1.25，使用受支持版本的安全补丁）。修改 BPF C 时额外准备 clang、llvm、libbpf 头文件。
 
 ```bash
-# 用到的工具：jq（下面查分数用，没有就装）
-sudo apt install -y jq            # CentOS: sudo dnf install -y jq
-
-# Falco（Ubuntu；CentOS 见 INSTALL §2）
-sudo install -dm755 /etc/apt/keyrings
-curl -s https://falco.org/repo/falcosecurity-packages.asc | sudo gpg --dearmor -o /etc/apt/keyrings/falco.gpg
-echo "deb [signed-by=/etc/apt/keyrings/falco.gpg] https://download.falco.org/packages/deb stable main" | sudo tee /etc/apt/sources.list.d/falco.list
-sudo apt update && sudo apt install -y falco
-
-# Go 1.25（go.dev 国内拉不动的话换镜像，见下方说明）
-wget https://go.dev/dl/go1.25.0.linux-amd64.tar.gz
-sudo rm -rf /usr/local/go
-sudo tar -C /usr/local -xzf go1.25.0.linux-amd64.tar.gz
-ls /sys/kernel/btf/vmlinux    # 必须存在（Falco modern eBPF 强依赖内核 BTF）
+uname -r
+ls /sys/kernel/btf/vmlinux
+sudo cat /sys/kernel/security/lsm
 ```
 
-> `go.dev` 国内直连慢/超时：换阿里云镜像 `https://mirrors.aliyun.com/golang/go1.25.0.linux-amd64.tar.gz`。下完先 `ls -lh` 看大小（约 70MB）再解压。
+Falco modern eBPF 需要 BTF。LSM 列表包含 `bpf` 才部署内核保护组件，否则运行检测模式。版本号不能代替实际能力检查，第一次完整实验建议使用可恢复的 Linux 虚拟机。
 
-## 2. 部署（监测机）
+## 2. 获取代码与准备基线
 
 ```bash
-git clone https://github.com/rrenziho333-bot/linux-runtime-security-stack.git ~/linux-runtime-security-stack
-cd ~/linux-runtime-security-stack
-/usr/local/go/bin/go env -w GOPROXY=https://goproxy.cn,direct   # 国内拉 Go 模块走代理
+git clone https://github.com/rrenziho333-bot/linux-runtime-security-stack.git
+cd linux-runtime-security-stack
+```
+
+完整模式先以随后执行 sudo 的同一普通用户下载 Go 模块：
+
+```bash
 /usr/local/go/bin/go mod download
+```
+
+安装 Lynis 后，在项目根目录准备基线：
+
+```bash
+mkdir -p tsa/reports
+sudo lynis audit system --quick --quiet --report-file "$PWD/tsa/reports/lynis-report.dat"
+sudo chown "$(id -un):$(id -gn)" tsa/reports/lynis-report.dat
+sudo chmod 0640 tsa/reports/lynis-report.dat
+```
+
+如果明确只做运行时演示，可以在 `tsa/policy_config.yaml` 将 `baseline_lynis.enabled` 设为 `false`。界面状态会注明基线被禁用；不能将此模式声称为已完成基线审计。
+
+## 3. 部署与检查
+
+```bash
 sudo ./deploy-security-stack.sh
-```
-
-## 3. 看服务（监测机）
-
-```bash
 systemctl is-active falco-modern-bpf tsa-fusion tsa-dashboard
-```
-期望三行 `active`。
-
-内核启用了 BPF LSM 时（`grep -w bpf /sys/kernel/security/lsm` 有 `bpf`），还会多一个 `bpf-lsm-controller`：
-
-```bash
-systemctl is-active bpf-lsm-controller   # 内核有 BPF LSM 时 active，没有则不装（见 INSTALL §1、§9）
+systemctl is-active bpf-lsm-controller
 ```
 
-## 4. 本机查分数（监测机）
+前三项应 active；完整模式第四项也 active。检测模式没有 BPF 控制器是正常现象。部署现在通过服务启动参数选择 TSA 的 BPF 输入，不修改源 YAML。
+
+服务启动约五秒后查询：
 
 ```bash
+curl -s http://127.0.0.1:8766/api/status | jq '.availability, .scores'
 curl -s http://127.0.0.1:8766/systemManage/risk/score | jq
 ```
-没触发任何事件时，期望满分：
-```json
-{"code":20000,"status":true,"message":"操作成功","data":{"final":100.0,"posture":100.0,"runtime":100.0,"generated_time":"..."}}
-```
 
-触发一次检测会扣分（详见 [INSTALL.md](INSTALL.md) "风险评分怎么算"）：
-```bash
-echo test | sudo tee -a /etc/tsa-protected-demo >/dev/null   # 写受保护文件
-sleep 3
-journalctl -u tsa-fusion -n 5 --no-pager                     # 看到 status=scored points=-N runtime=NN
-curl -s http://127.0.0.1:8766/systemManage/risk/score | jq   # runtime 从 100 掉下来
-```
+就绪时接口返回 `code:20000`。基线不可用、服务停止、日志未打开或心跳过期时返回 HTTP 503、`code:50000`、`data:null`，需要按 availability 和 journal 排查。
 
-## 5. 别人查分数（另一台主机）
+## 4. 触发一次审计
 
-监测机查 IP：`ip a | grep "inet " | grep -v 127.0.0.1`，取局域网地址（如 192.168.1.50）。
-
-另一台主机：
-```bash
-curl -s http://192.168.1.50:8766/systemManage/risk/score | jq
-```
-拿到和第 4 步一样的 JSON，就通了。
-
-## 6. 一眼确认复现成功
-
-部署完跑这一段，四层证据（服务 / 事件 / 分数 / 规则）一次看全。全部符合就是真复现成功。
+默认 `policy.yaml` 是 audit。执行：
 
 ```bash
-echo "===== 服务 ====="
-systemctl is-active falco-modern-bpf bpf-lsm-controller tsa-fusion tsa-dashboard
-echo "===== 模式 ====="
-grep -wq bpf /sys/kernel/security/lsm && echo "完整模式" || echo "降级模式"
-echo "===== 触发检测 ====="
 echo verify | sudo tee -a /etc/tsa-protected-demo >/dev/null
 sleep 3
-echo "--- Falco ---"
-sudo tail -n 3 /var/log/falco/falco.json | jq -c '{rule, priority}'
-echo "--- BPF LSM ---"
-sudo tail -n 1 /var/log/bpf-lsm/events.jsonl 2>/dev/null | jq -c '{action, policy_name}' 2>/dev/null || echo "(无 = 降级模式正常)"
-echo "--- TSA 评分 ---"
-journalctl -u tsa-fusion -n 6 --no-pager | grep scored
-echo "===== 分数 ====="
-curl -s http://127.0.0.1:8766/systemManage/risk/score | jq '.data'
-echo "===== 规则统计 ====="
-echo "官方规则数: $(grep -c '^- rule:' /etc/falco/falco_rules.yaml)"
-echo "自定义规则文件:"; ls /etc/falco/rules.d/
+sudo tail -n 5 /var/log/falco/falco.json
+sudo tail -n 5 /var/log/bpf-lsm/events.jsonl
+journalctl -u tsa-fusion -n 15 --no-pager
+curl -s http://127.0.0.1:8766/systemManage/risk/score | jq
 ```
 
-**期望看到什么：**
+检测模式没有 BPF 日志；完整模式应看到演示策略的 audit 事件。Falco 和 BPF 的事件分别计分；重复事件、已有风险和实际启用规则会影响数值，不保证每次固定扣 7 分。浏览器打开 `http://127.0.0.1:8766/` 查看证据。
 
-| 项 | 完整模式 | 降级模式 |
-|---|---|---|
-| 服务 | 4 行 `active` | `bpf-lsm-controller` 是 `inactive`，其余 3 行 `active` |
-| 模式 | "完整模式" | "降级模式" |
-| Falco | `{"rule":"Monitor specific file access","priority":"Warning"}` | 同左 |
-| BPF LSM | `{"action":"audit","policy_name":"protect_demo_config"}` | "(无 = 降级模式正常)" |
-| TSA 评分 | **两条** `scored`：Falco `points=-5` + BPF `points=-2` | **一条** `scored`：Falco `points=-5` |
-| 分数 | `runtime` 低于 100（Falco 扣 5 + BPF 扣 2），`final = posture×0.4 + runtime×0.6` | `runtime` 低于 100（扣 5），`final` 同公式 |
-| 规则统计 | 官方规则数有值；自定义文件含 `90-local-file-monitoring.yaml`、`95-security-stack-exceptions.yaml` | 同左 |
+## 5. 另一台电脑访问
 
-> "官方规则数"是本机 Falco 版本实际带的规则条数，Falco 0.44.x 主规则文件约 25 条；老版本算上 sandbox/incubating 可达 90+。**有数即可**，具体多少取决于你装的 Falco 版本（见 [INSTALL.md](INSTALL.md) §7）。
-
-### 规则文件在哪、多少条、怎么数
-
-| 规则类型 | 仓库源（可改） | 部署后实际生效位置 |
-|---|---|---|
-| 官方规则 | （来自你装的 Falco 包，不在仓库） | `/etc/falco/falco_rules.yaml`（+ `falco-sandbox_rules.yaml`、`falco-incubating_rules.yaml`，看 Falco 装没装这俩）|
-| 自定义规则 | `falco/rules.d/90-local-file-monitoring.yaml` | `/etc/falco/rules.d/90-local-file-monitoring.yaml`（部署脚本 copy 过去）|
-| 白名单补丁 | `falco/rules.d/95-security-stack-exceptions.yaml` | `/etc/falco/rules.d/95-security-stack-exceptions.yaml`（部署时按本机符号剥离失效段）|
-| 官方规则阅读快照 | `falco/official-rules/`（25+37+31=93 条全量，只供分析不参与运行）| — |
-
-数本机真正生效的规则：
+在访问端保持 SSH 转发运行，替换成监测机的账户与地址：
 
 ```bash
-# 看 rules_files 实际加载了哪些文件(决定哪些规则生效)
-sed -n '/^rules_files:/,/^[a-z]/p' /etc/falco/falco.yaml | grep '  -'
-
-# 把上面列出的每个文件数一遍,加起来就是生效规则数
-grep -c '^- rule:' /etc/falco/falco_rules.yaml
-grep -c '^- rule:' /etc/falco/falco-sandbox_rules.yaml 2>/dev/null
-grep -c '^- rule:' /etc/falco/falco-incubating_rules.yaml 2>/dev/null
-
-# 列出本机所有生效规则名
-grep -h '^- rule:' /etc/falco/falco_rules.yaml /etc/falco/rules.d/*.yaml | sed 's/^- rule: //'
+ssh -N -L 127.0.0.1:8766:127.0.0.1:8766 user@linux-host
 ```
 
-你想看/改某条规则本身：
+然后在访问端浏览器打开 `http://127.0.0.1:8766/`，或另一个终端执行同样的 curl。不要开放 8766 端口。多用户系统集成应使用有鉴权的 TLS 代理，详见升级说明。
 
-```bash
-# 自定义规则(改后 sudo ./deploy-security-stack.sh 重新部署生效)
-ls ~/linux-runtime-security-stack/falco/rules.d/
-cat ~/linux-runtime-security-stack/falco/rules.d/90-local-file-monitoring.yaml
+## 6. 确认规则与阻断边界
 
-# 官方规则(只读,改动会被 Falco 包升级覆盖)
-grep -A8 '^- rule: Write below etc' /etc/falco/falco_rules.yaml     # 例：看"写 /etc"那条
-```
+自定义规则在 `falco/rules.d/`，部署后复制到 `/etc/falco/rules.d/`。官方规则实际由 Falco 配置加载；仓库 `falco/official-rules/` 的 93 条是阅读快照，不能当作本机已启用数量。
 
-> 仓库 `falco/official-rules/` 里是 93 条官方规则的可读快照，clone 后直接看，不参与运行。要和本机已装 Falco 版本对齐，用 `falco/fetch-official-rules.sh` 重新拉取（见 [INSTALL.md](INSTALL.md) §10）。默认只 25 条生效想开全量 93 条见 [INSTALL.md](INSTALL.md) §7.1。
+`audit` 不阻断；必须加载 `enforce` 策略才能拒绝操作。第一次只对演示文件测试，同时核对操作失败、BPF deny 事件和看板结果。新增 mmap/mprotect hooks 不会撤销加载策略前已有的共享可写映射，切换模式后应重启相关实验进程。
 
-浏览器看板 `http://127.0.0.1:8766/`：流水线区 Falco/TSA 绿色 active、风险评分区有数值、证据链区出现刚才 `tee` 写 `/etc/tsa-protected-demo` 的事件——也齐了。
-
-任一层不对，对照 [INSTALL.md](INSTALL.md) §6 的四步验证排。
-
-## 不通？
-
-- 别人访问不通：云主机要去云控制台安全组放行 8766；本机 `ss -ltnp | grep 8766` 应见 `0.0.0.0:8766`。
-- 返回 `code:50000`：`systemctl status tsa-fusion` 看 active 没有。
-- `bpf-lsm-controller` 反复 `activating` 不 `active`：看 `journalctl -u bpf-lsm-controller -n 10`，如果是 `load BTF for kmod ... string table is empty`，确认 Go 是 1.25 且 `go.mod` 用的是 `cilium/ebpf v0.22.0`（已修）；还报错回 INSTALL §3 的 Go 版本说明。
-- 部署失败：多半是前置没装好，回 INSTALL §1–§3。
+问题按以下顺序排查：服务状态 -> 原始日志 -> TSA journal -> `/api/status` 的 availability -> 评分 API。`/healthz` 现在也检查数据可用性，不再是无条件成功。

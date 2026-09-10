@@ -166,6 +166,8 @@ var diagnosticNames = []string{
 	"audit_event",
 	"deny_event",
 	"ringbuf_dropped",
+	"mmap_file",
+	"file_mprotect",
 }
 
 func logDiagnostics(objects *lsmbpfObjects, stop <-chan struct{}) {
@@ -238,6 +240,10 @@ func decodeSecurityEvent(raw []byte, policyNames map[uint32]string) (outputEvent
 		operation = "rename_target"
 	case operationSetattr:
 		operation = "setattr"
+	case operationMmapWrite:
+		operation = "mmap_write"
+	case operationMprotectWrite:
+		operation = "mprotect_write"
 	}
 
 	return outputEvent{
@@ -270,6 +276,8 @@ func attachLSMPrograms(objects *lsmbpfObjects) ([]link.Link, error) {
 		{"inode_unlink", objects.HandleInodeUnlink},
 		{"inode_rename", objects.HandleInodeRename},
 		{"inode_setattr", objects.HandleInodeSetattr},
+		{"mmap_file", objects.HandleMmapFile},
+		{"file_mprotect", objects.HandleFileMprotect},
 	}
 
 	links := make([]link.Link, 0, len(programs))

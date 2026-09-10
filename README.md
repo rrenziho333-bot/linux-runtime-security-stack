@@ -2,19 +2,21 @@
 
 把 Falco、BPF LSM、TSA、Lynis 组合成一条主机安全流水线：Falco 发现可疑行为并报警，BPF LSM 在内核对敏感文件做审计或阻断，TSA 汇总事件算风险分，Lynis 给系统基线分。
 
+> 安全升级：看板改为仅本机访问，远程使用 SSH 转发或有鉴权的 TLS 代理；基线或采集不可用时评分接口返回 503，不再返回误导性高分。新增共享 mmap/mprotect 保护、事务化事件处理及回归测试，迁移步骤见 [安全审查与升级说明](docs/SECURITY_REVIEW.md)。
+
 - 从空白机器开始装前置：[docs/INSTALL.md](docs/INSTALL.md)
 - 最快跑通（5 步，从 clone 到别人 curl 拿分）：[docs/QUICKSTART.md](docs/QUICKSTART.md)
 - 已装好前置、只需部署和实时检测：[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)
 - 风险分怎么算：[docs/INSTALL.md](docs/INSTALL.md) §6.6
 
-> **验证环境**：Ubuntu 22.04（kernel 6.8）+ Falco 0.44.x + Go 1.25 上完整模式端到端跑通（Falco 检测 + BPF LSM 内核审计 + TSA 双源评分 + 看板 + 对外接口）。部署脚本已适配 Falco 多版本差异，新手照 QUICKSTART 可从空白机一次性复现。
+> **上游原版本记录的验证环境**：Ubuntu 22.04（kernel 6.8）+ Falco 0.44.x + Go 1.25。安全加固后的构建、测试和目标内核验证边界见 [审查记录](docs/SECURITY_REVIEW.md)。
 
 ## 30 秒速览
 
 - 干什么的：在 Linux 主机上做运行时安全检测。Falco 按规则报警，BPF LSM 在内核对受保护文件做审计或阻断，TSA 融合事件算风险分，Lynis 给基线分。
 - 怎么跑：装好 Falco + Go 前置 → `sudo ./deploy-security-stack.sh` 一键部署。脚本会探测内核：有 BPF LSM 就检测+阻断，没有就自动降级为纯检测。
 - 怎么验：`systemctl is-active` 看服务 → 写 `/etc/tsa-protected-demo` 触发检测 → 看板 `http://127.0.0.1:8766/` 看证据。
-- 怎么对接：外部系统 `GET http://<监测机IP>:8766/systemManage/risk/score` 拿实时风险分。
+- 怎么对接：经 SSH 转发或有鉴权的代理查询 `GET /systemManage/risk/score`；本机地址为 `http://127.0.0.1:8766/systemManage/risk/score`。
 - 跑不起来先看：前置装了吗（INSTALL §2、§3）？内核够新吗？CentOS 7 不行，需要 8/Stream 9 以上。
 
 ## 1. 一张图理解项目
@@ -89,7 +91,7 @@ systemctl is-active falco-modern-bpf bpf-lsm-controller tsa-fusion tsa-dashboard
 # 完整模式四项 active；降级模式 bpf-lsm-controller 为 inactive（正常，见文档）
 ```
 
-部署脚本会按当前 `SUDO_USER` 和脚本所在目录自动生成 systemd unit，不用手改路径。移植到新主机时把仓库放任意目录、用部署用户执行 `sudo` 即可，详见 [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)。
+部署脚本按当前 `SUDO_USER` 和目录生成 systemd unit。目录使用英文字符、数字、`/`、`_`、`-`、`.`，例如 `/home/alice/linux-runtime-security-stack`。用部署用户执行 sudo，详见 [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)。
 
 脚本会探测内核是否支持 BPF LSM：支持就部署完整模式（检测+阻断，四个服务都 active）；不支持就自动降级为纯检测（跳过 `bpf-lsm-controller`，关闭 TSA 的 BPF 日志源，对应 `is-active` 显示 inactive），Falco + TSA + 看板照常工作。降级细节见 [docs/INSTALL.md](docs/INSTALL.md) 第 9 节。
 
@@ -102,25 +104,23 @@ grep -w bpf /sys/kernel/security/lsm   # 输出含 bpf = 完整模式；无输�
 看板地址：
 
 ```text
-http://127.0.0.1:8766/   （别的主机用 http://<监测机IP>:8766/）
+http://127.0.0.1:8766/   （别的主机通过 SSH 转发访问）
 ```
 
-不知道监测机 IP 的话，在监测机上执行 `ip a` 或 `hostname -I`，取局域网地址填进去。
-
-服务绑 `0.0.0.0:8766`，可被别的主机访问（部署脚本自动放行防火墙 8766 端口）。
+服务只绑定 `127.0.0.1:8766`，部署不自动开防火墙端口。远程访问先运行 `ssh -N -L 127.0.0.1:8766:127.0.0.1:8766 user@linux-host`。
 
 ### 对外接口：查询实时风险分值
 
 外部系统（如零信任管理系统）可用 HTTP GET 查询监测机的实时风险分，响应遵循《零信任管理系统接口文档》统一信封 `{code, status, message, data}`：
 
 ```bash
-# 别的主机查询监测机实时分值
-curl http://<监测机IP>:8766/systemManage/risk/score
+# 在监测机本机，或已建立 SSH 转发的访问端查询
+curl http://127.0.0.1:8766/systemManage/risk/score
 # → {"code":20000,"status":true,"message":"操作成功",
 #    "data":{"final":100.0,"posture":100.0,"runtime":100.0,"generated_time":"..."}}
 ```
 
-`final` 是最终风险分（满分 100，越低越危险）。接口验证和他机访问排查见 [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) 第 9 节。
+`final` 是最终风险分（满分 100，越低越危险）。上例只适用于基线和采集就绪；否则 HTTP 503、`code:50000`、`data:null`。看板显示未知值，详见 [升级说明](docs/SECURITY_REVIEW.md)。
 
 完整部署与验证步骤见 [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)。导师汇报提纲见 [docs/MENTOR_REPORT.md](docs/MENTOR_REPORT.md)。技术边界与安全设计见 [SECURITY_STACK.md](SECURITY_STACK.md)。
 

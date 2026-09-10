@@ -1,14 +1,16 @@
 # 空白 Linux 从零到可运行
 
+> 安全升级后的访问和验收方式见 [SECURITY_REVIEW.md](SECURITY_REVIEW.md)：仅回环监听；真实基线报告需完整且未过期；评分缺数据返回 503。旧版本“缺报告也满分”不再成立。
+
 面向一台全新安装、没配过安全栈的 Linux 主机，把它带到能成功跑 `sudo ./deploy-security-stack.sh`、检测流水线生效的状态。
 
-部署脚本没有硬编码路径，在任意目录都能跑。真正容易卡住的是两个前置：Falco 和 Go。BPF LSM 是可选的——有它就能做内核级阻断，没有就自动降级为纯检测（见第 9 节）。
+部署支持由英文字母、数字、`/`、`_`、`-`、`.` 组成的绝对路径。真正容易卡住的是两个前置：Falco 和 Go。BPF LSM 可选，没有时自动降级为纯检测。
 
 > 支持两个发行版系列：Ubuntu / Debian（apt）和 CentOS（dnf/yum）。每个步骤都给两种命令，任选其一。其他发行版按等价命令替换包管理器即可。
 
 ## 0. 适用平台与权限
 
-- x86_64 Linux 内核 ≥ 5.7（BPF LSM 引入版本），建议 ≥ 5.13（LSM hook 更全）。
+- x86_64 Linux，优先使用已验证系列的 6.8 内核，并实际检查 BTF/BPF LSM。5.7 是 BPF LSM 引入版本，不是当前整套程序的兼容性保证。
 - 全程需要 root（`sudo`）。部署脚本以 `SUDO_USER` 作为运行/构建账户。
 - 不支持 macOS / WSL1 / 无 BPF LSM 的内核端到端运行；TSA 纯软件部分可在任意平台跑单测。
 
@@ -201,7 +203,7 @@ TSA 配置默认 `run_lynis: false`，即只读 Lynis 报告、不主动执行�
 ## 5. 克隆并部署
 
 ```bash
-# 任意目录、任意有 sudo 权限的用户；Ubuntu / CentOS 命令一致
+# 使用不含空格等特殊字符的路径；通过有 sudo 权限的普通用户执行
 git clone https://github.com/rrenziho333-bot/linux-runtime-security-stack.git ~/linux-runtime-security-stack
 cd ~/linux-runtime-security-stack
 ```
