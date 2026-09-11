@@ -1,523 +1,119 @@
-# 空白 Linux 从零到可运行
+# Ubuntu 复现指南
 
-> 安全升级后的访问和验收方式见 [SECURITY_REVIEW.md](SECURITY_REVIEW.md)：仅回环监听；真实基线报告需完整且未过期；评分缺数据返回 503。旧版本“缺报告也满分”不再成立。
+安装与快速指南已合并。按顺序执行本文件即可，不必再看另一份安装文档。
 
-面向一台全新安装、没配过安全栈的 Linux 主机，把它带到能成功跑 `sudo ./deploy-security-stack.sh`、检测流水线生效的状态。
+适用：Ubuntu 22.04 LTS x86_64、systemd、可 sudo 的普通用户；实验虚拟机建议 2 核、4 GB 内存、30 GB 磁盘，先做快照。终端和 APT 都需要能访问软件源、GitHub、Go 下载站与模块代理；受限网络先配置可用代理，只有浏览器能联网还不够。命令报错时先解决，再从失败命令继续，不要跳过校验或重新克隆覆盖已有目录。
 
-部署支持由英文字母、数字、`/`、`_`、`-`、`.` 组成的绝对路径。真正容易卡住的是两个前置：Falco 和 Go。BPF LSM 可选，没有时自动降级为纯检测。
+本路线已在新建官方 Ubuntu 22.04.5 镜像虚拟机实测，使用 6.8 HWE 内核、Falco 0.44.1、Go 1.26.8，默认完整模式但策略为 **audit（记录、放行）**。验证记录与限制见 [VM_VALIDATION.md 第 8 节](VM_VALIDATION.md#8-干净-ubuntu-从-main-复现)。
 
-> 支持两个发行版系列：Ubuntu / Debian（apt）和 CentOS（dnf/yum）。每个步骤都给两种命令，任选其一。其他发行版按等价命令替换包管理器即可。
+## 1. 准备系统与内核
 
-## 0. 适用平台与权限
-
-- x86_64 Linux，优先使用已验证系列的 6.8 内核，并实际检查 BTF/BPF LSM。5.7 是 BPF LSM 引入版本，不是当前整套程序的兼容性保证。
-- 全程需要 root（`sudo`）。部署脚本以 `SUDO_USER` 作为运行/构建账户。
-- 不支持 macOS / WSL1 / 无 BPF LSM 的内核端到端运行；TSA 纯软件部分可在任意平台跑单测。
-
-## 1. （可选）开启内核 BPF LSM，启用内核级阻断
-
-BPF LSM 是"内核级阻断"的依赖，但不是检测的依赖。没有它，项目自动降级为"Falco 检测 + TSA 评分 + 看板"（见第 9 节），照样能跑、能看报警和评分，只差"在内核里直接拒绝非法操作"这一项。
-
-所以这一节你看需求决定要不要折腾：
-
-- 只想要检测 + 评分 + 看板 → 跳过本节，直接装 Falco/Go（第 2、3 节）。
-- 还要内核级阻断（enforce 模式返回 -EPERM）→ 按本节确认内核是否支持。
-
-BPF LSM 需要两个条件都满足：内核编译时开了 `CONFIG_BPF_LSM=y`，且引导参数 `lsm=` 含 `bpf`。它和 `CONFIG_DEBUG_INFO_BTF=y`（Falco modern eBPF 强依赖）都是内核编译期选项，靠 Ubuntu 版本号没法一刀切判断，必须在目标机上用下面两条命令实测。
-
-### 1.1 两条命令判断当前状态
+在 Ubuntu 终端执行，不要使用 root 登录后直接部署。本机访问 Ubuntu 主源不稳定，以下使用阿里云 Ubuntu HTTPS 镜像，仍由 Ubuntu 签名验证软件包；保留原源文件备份（仅针对 22.04 的传统源文件）。已有可用源时可跳过前两条命令：
 
 ```bash
-# 1) 内核是否编译了 BPF LSM（=y 才算支持）
-grep CONFIG_BPF_LSM /boot/config-$(uname -r) 2>/dev/null \
-  || zgrep CONFIG_BPF_LSM /proc/config.gz 2>/dev/null \
-  || echo "未找到内核配置，可能需要安装 kernel-devel 或开启 CONFIG_IKCONFIG_PROC"
-
-# 2) 引导期是否加载了 bpf LSM（输出列表里含 bpf 才算已启用）
-grep -w bpf /sys/kernel/security/lsm
-```
-
-根据结果对照下表，决定下一步：
-
-| 第 1 条结果 | 第 2 条结果 | 含义 | 下一步 |
-|---|---|---|---|
-| `CONFIG_BPF_LSM=y` | 含 `bpf` | 内核级阻断**可用** | 直接部署，完整模式（检测+阻断） |
-| `CONFIG_BPF_LSM=y` | 不含 `bpf` | 编译了但没加载 | 改 grub 引导参数（1.2），重启即完整模式 |
-| `not set` 或 `=n` | — | 内核没编译支持 | 换内核/自编译（1.3），或直接走降级方案（第 9 节） |
-
-> 大多数 Ubuntu 标准内核落在第三行。对多数人来说，换内核的代价高于收益——直接走降级方案是最务实的选择，检测链路一样齐全，只少内核阻断。
-
-### 1.2 编译了但没加载：改 grub 引导参数
-
-这种情况说明内核有能力（编译了 `CONFIG_BPF_LSM=y`），但启动时没启用——LSM 要不要加载由内核启动参数 `lsm=` 决定，得把 `bpf` 加进这个参数。
-
-分两步：先改 grub 源文件，再重新生成实际生效的 grub 配置。两步缺一不可，只改源文件不重新生成不会生效。
-
-**第 1 步：编辑 grub 源文件，在启动参数里加 bpf**
-
-```bash
-sudo nano /etc/default/grub
-```
-找到 `GRUB_CMDLINE_LINUX_DEFAULT=...` 这一行，在末尾的引号内追加
-`lsm=...bpf`（`lsm=` 是逗号分隔，`bpf` 放最后即可）。例如改为：
-```text
-GRUB_CMDLINE_LINUX_DEFAULT="quiet splash lsm=lockdown,y,integrity,apparmor,bpf"
-```
-（CentOS 原有参数可能不含 `splash`，照机器原本的来，只在末尾加 `lsm=...,bpf`。）
-
-**第 2 步：重新生成 grub 配置并重启**
-
-先确认启动方式（BIOS 还是 EFI），这决定用哪条命令：
-
-```bash
-ls /sys/firmware/efi 2>/dev/null && echo "EFI 启动" || echo "BIOS 启动"
-```
-
-然后按发行版 + 启动方式选一条命令，执行后重启：
-
-```bash
-# Ubuntu / Debian
-sudo update-grub                    # BIOS 启动
-# EFI 启动若 update-grub 报错，改用：
-#   sudo grub-mkconfig -o /boot/efi/EFI/ubuntu/grub.cfg
-
-# CentOS（没有 update-grub，用 grub2-mkconfig；按 BIOS/EFI 选一条）
-sudo grub2-mkconfig -o /boot/grub2/grub.cfg              # BIOS 启动
-sudo grub2-mkconfig -o /boot/efi/EFI/centos/grub.cfg     # EFI 启动
-
+sudo cp -n /etc/apt/sources.list /etc/apt/sources.list.lrss-backup
+sudo sed -i -E 's@https?://([a-z.]*archive|security)\.ubuntu\.com/ubuntu/?@https://mirrors.aliyun.com/ubuntu/@g' /etc/apt/sources.list
+sudo apt-get -o APT::Update::Error-Mode=any update
+sudo apt-get install -y ca-certificates curl gnupg git python3-yaml jq lynis logrotate linux-generic-hwe-22.04
 sudo reboot
 ```
 
-> CentOS EFI 用户：确认 grub.cfg 实际路径。上面写的是常见路径 `/boot/efi/EFI/centos/grub.cfg`，但不同安装方式目录名可能不同（`centos` / `centos-stream` / `rhel` 等）。先查实际目录：
-> ```bash
-> ls /boot/efi/EFI/
-> ```
-> 找到里面的 `<目录名>/grub.cfg`，把命令里的 `centos` 换成实际目录名即可。Ubuntu EFI 同理，目录名一般是 `ubuntu`，不是的话用 `ls /boot/efi/EFI/` 确认。
-
-重启后再次 `grep -w bpf /sys/kernel/security/lsm`，输出含 `bpf` 就成功了。
-
-### 1.3 没编译支持：换内核或自编译（可选，代价较高）
-
-> CentOS 用户先看这条：CentOS 7 内核太旧（3.x），根本没有 BPF LSM（需内核 ≥5.7），必须先升级到 CentOS 8 / Stream 9 以上，否则本节其余内容无从谈起。
-
-如果内核已经较新、但仍没开 `CONFIG_BPF_LSM`，又想保留内核级阻断：
-
-- **Ubuntu**：官方 `linux-generic` 通常未开，可试 `linux-generic-hwe`；仍不行自行编译内核。
-- **CentOS 8 / Stream 9**：官方内核较新但默认常未开 `CONFIG_BPF_LSM`；可装 ELRepo 的较新内核
-  （`dnf install elrepo-release && dnf install kernel-ml`）或自行编译。
-- **自编译内核**：在内核 config 里设 `CONFIG_BPF_LSM=y`（位于 `Security options → BPF LSM`），重编安装。
-
-> 不愿换内核就跳过本节，直接用降级方案（第 9 节）——检测功能照样完整运行，只少内核阻断。确认命令同 1.1。
-
-### 1.4 发行版现状参考
-
-Ubuntu：
-
-- 标准 `linux-generic` 内核开 BPF LSM 的情况不稳定；`linux-generic-hwe` / `linux-generic-edge` 开启概率更高。很多 Ubuntu 实测达不到——这正是本项目提供降级方案的原因。
-- Ubuntu 通常已开 `CONFIG_DEBUG_INFO_BTF`（Falco modern eBPF 需要它，一般不缺）。
-
-CentOS：
-
-- 需 CentOS 8 / Stream 9 以上（CentOS 7 内核太旧，见 1.3）。
-- 官方内核较新，但 `CONFIG_BPF_LSM` 仍可能未开——以 1.1 实测为准。
-- 通常已开 `CONFIG_DEBUG_INFO_BTF`（Falco modern eBPF 需要）。
-
-### 1.5 常见坑
-
-- 改了 `lsm=` 不生效：EFI 系统确认更新的是正确的 grub.cfg；少数系统用 `systemd-boot`，改 `/etc/kernel/cmdline` 后 `sudo bootctl update`。
-- `/sys/kernel/security/lsm` 不存在：内核未编 `CONFIG_SECURITY`，需换内核。
-- 容器/VM 内看不到：LSM 是宿主机内核能力，建议直接在宿主机裸跑。
-
-## 2. 安装 Falco（modern eBPF 驱动）
-
-项目用 Falco 的 modern eBPF 驱动（不依赖旧的 Kmodule/legacy 驱动），服务名 `falco-modern-bpf.service`。实测在 Falco 0.44.x 上跑通；部署脚本里的 `falco/deploy-host-falco.sh` 已适配多版本配置差异，只负责往 `/etc/falco/falco.yaml` 塞规则并重启服务，不负责安装 Falco 本体，所以必须先装好。
-
-### 2.1 官方源安装（推荐）
+重新登录后检查内核，并启用 BPF LSM（保留当前启用的其他 LSM）：
 
 ```bash
-# Ubuntu / Debian
-sudo mkdir -p /etc/apt/keyrings
-curl -s https://falco.org/repo/falcosecurity-packages.asc | \
-  sudo gpg --dearmor -o /etc/apt/keyrings/falco-archive-keyring.gpg
-echo "deb [signed-by=/etc/apt/keyrings/falco-archive-keyring.gpg] https://download.falco.org/packages/deb stable main" \
+uname -r
+test -r /sys/kernel/btf/vmlinux
+grep '^CONFIG_BPF_LSM=y' /boot/config-"$(uname -r)"
+sudo cat /sys/kernel/security/lsm
+```
+
+最后一条含 `bpf` 就跳过下面这个代码块；不含时执行并再次登录：
+
+```bash
+LSM="$(sudo cat /sys/kernel/security/lsm)"
+printf 'GRUB_CMDLINE_LINUX_DEFAULT="$GRUB_CMDLINE_LINUX_DEFAULT lsm=%s,bpf"\n' "$LSM" \
+  | sudo tee /etc/default/grub.d/99-lrss-bpf.cfg
+sudo update-grub
+sudo reboot
+```
+
+重启后 `sudo grep -w bpf /sys/kernel/security/lsm` 必须成功。若内核配置或 BTF 检查失败，先解决内核问题；无 BPF LSM 的部署会降级为纯检测，不能算完整复现。以上引导步骤仅用于 Ubuntu GRUB。
+
+## 2. 安装 Falco 和 Go
+
+Falco 使用官方签名软件源、modern eBPF；关闭系统规则自动更新，项目使用自己的锁定规则包：
+
+```bash
+curl -fL --retry 3 https://falco.org/repo/falcosecurity-packages.asc -o /tmp/falcosecurity.asc
+sudo gpg --batch --yes --dearmor -o /usr/share/keyrings/falco-archive-keyring.gpg /tmp/falcosecurity.asc
+echo 'deb [signed-by=/usr/share/keyrings/falco-archive-keyring.gpg] https://download.falco.org/packages/deb stable main' \
   | sudo tee /etc/apt/sources.list.d/falcosecurity.list
-sudo apt-get update && sudo apt-get install -y falco
-```
-
-```bash
-# CentOS 8 / Stream 9（dnf；CentOS 7 用 yum 同理）
-sudo rpm --import https://falco.org/repo/falcosecurity-packages.asc
-sudo curl -s -o /etc/yum.repos.d/falcosecurity.repo \
-  https://falco.org/repo/falcosecurity-rpm.repo
-sudo dnf install -y falco
-```
-
-### 2.2 验证
-
-```bash
+sudo apt-get -o APT::Update::Error-Mode=any update
+sudo env FALCO_FRONTEND=noninteractive FALCO_DRIVER_CHOICE=modern_ebpf FALCOCTL_ENABLED=no apt-get install -y falco=0.44.1
 falco --version
-# modern eBPF 驱动需要内核 BTF（CONFIG_DEBUG_INFO_BTF=y），确认：
-ls /sys/kernel/btf/vmlinux   # 存在即可
 ```
 
-> 若 `/sys/kernel/btf/vmlinux` 不存在，需内核开 `CONFIG_DEBUG_INFO_BTF=y`（modern eBPF 强依赖）。这是 1.3 之外第二个"可能要换内核"的点。
-
-## 3. 安装 Go 工具链（仅完整模式需要）
-
-> 降级模式可跳过本节。Go 只用来编译 BPF LSM 控制器（`bpf-lsm-controller`）。若内核没有 BPF LSM、走降级模式，部署脚本会自动跳过 Go 编译，不用装 Go。要完整模式（内核级阻断）才必须装。
-
-部署脚本写死 `/usr/local/go/bin/go`，需 **Go 1.25**（项目的 `go.mod` 声明 `go 1.25.0`，依赖 `cilium/ebpf v0.22.0` 要求 1.25）。直接装 1.25，避免部署时 `GOTOOLCHAIN=auto` 又去联网下载工具链。
+Go 安装到用户独立目录，不删除系统原有工具链；解压前必须看到校验 `OK`：
 
 ```bash
-wget https://go.dev/dl/go1.25.0.linux-amd64.tar.gz
-sudo rm -rf /usr/local/go
-sudo tar -C /usr/local -xzf go1.25.0.linux-amd64.tar.gz
-/usr/local/go/bin/go version    # 应输出 go1.25.x
+mkdir -p "$HOME/.local/lib/lrss-go1.26.8"
+curl -fL --retry 3 https://go.dev/dl/go1.26.8.linux-amd64.tar.gz -o /tmp/lrss-go1.26.8.tar.gz
+echo 'd0f743b33e8d8945e6b1f432edd15785c70507121d6e2a723b21285eddf8b57b  /tmp/lrss-go1.26.8.tar.gz' | sha256sum -c -
+tar -xzf /tmp/lrss-go1.26.8.tar.gz -C "$HOME/.local/lib/lrss-go1.26.8"
+"$HOME/.local/lib/lrss-go1.26.8/go/bin/go" version
 ```
 
-> `go.dev` 国内直连慢或超时：换阿里云镜像 `https://mirrors.aliyun.com/golang/go1.25.0.linux-amd64.tar.gz`。下完先 `ls -lh` 看大小（约 70MB）再解压；下成空文件直接 `tar` 会报错。
+## 3. 克隆、准备基线并部署
 
-> 为什么是 1.25 不是 1.23：`cilium/ebpf v0.19.0` 在 Ubuntu 6.8 内核上会因为某个内核模块（`sha1_ssse3`）的 BTF 字符串表为空而启动失败，项目升级到了 `cilium/ebpf v0.22.0` 修复这个问题，而 v0.22 要求 Go ≥ 1.25。
+以下命令在同一个终端中按顺序执行。路径不要含空格或中文；已有同名目录时使用新的目录，不要覆盖原项目。
 
-Go 依赖要在有网环境预先拉到模块缓存（部署脚本用 `GOPROXY=off` 离线构建）。这一步要在 clone 项目之后做（需要项目的 `go.mod`），所以放到 §5 克隆之后，本节只装工具链就行。国内拉模块记得先换代理：
+生成基线前确认 `date -u` 时间正确、`timedatectl` 已同步。VMware 时间反复跳动时可用 `sudo vmware-toolbox-cmd timesync disable` 关闭 Tools 周期同步，并用 `sudo timedatectl set-ntp true` 保留系统 NTP；开机/恢复后的时间也要检查，同步完成后再继续。
 
 ```bash
-/usr/local/go/bin/go env -w GOPROXY=https://goproxy.cn,direct
+git clone https://github.com/rrenziho333-bot/linux-runtime-security-stack.git
+cd linux-runtime-security-stack
+GO_BIN="$HOME/.local/lib/lrss-go1.26.8/go/bin/go"
+"$GO_BIN" mod download
+"$GO_BIN" mod verify
+mkdir -p tsa/reports
+sudo lynis audit system --quick --quiet --report-file "$PWD/tsa/reports/lynis-report.dat"
+sudo chown "$(id -un):$(id -gn)" tsa/reports/lynis-report.dat
+sudo chmod 0640 tsa/reports/lynis-report.dat
+sudo GO_BIN="$GO_BIN" ./deploy-security-stack.sh
 ```
 
-（`goproxy.cn` 是七牛维护的国内 Go 模块镜像，直连稳定。）
+Go 模块代理直连失败时，只对下载命令指定 `GOPROXY=https://goproxy.cn,direct "$GO_BIN" mod download`，保留默认校验和验证。其他下载超时需先配置可用网络；不要关闭 TLS 或 APT 签名验证。没有完整、新鲜的基线报告时评分为不可用，不会当成 100 分。
 
-## 4. 安装 Lynis（可选，仅基线分）
+## 4. 验收
 
-不装的话 TSA 的 `posture`（静态基线）分恒为满分；装了才能按 Lynis 报告扣分。
+等待约 10 秒后，在 Ubuntu 内部执行：
 
 ```bash
-sudo apt-get install -y lynis  # Ubuntu / Debian
-# CentOS（Lynis 在 EPEL 源，需先启用 EPEL）
-sudo dnf install -y epel-release && sudo dnf install -y lynis
-lynis show version
+systemctl is-active falco-modern-bpf bpf-lsm-controller tsa-fusion tsa-dashboard
+curl --fail http://127.0.0.1:8766/healthz
+echo verify | sudo tee -a /etc/tsa-protected-demo >/dev/null
+sleep 3
+sudo tail -n 10 /var/log/falco/falco.json
+sudo tail -n 10 /var/log/bpf-lsm/events.jsonl
+curl --fail http://127.0.0.1:8766/systemManage/risk/score
 ```
 
-TSA 配置默认 `run_lynis: false`，即只读 Lynis 报告、不主动执行。要让 TSA 周期跑 Lynis，改 `tsa/policy_config.yaml` 的 `baseline_lynis.run_lynis: true`（需 TSA 进程有 root，与当前以普通用户运行的设计冲突，一般保持 false、由 cron 单独跑 Lynis 生成报告更稳）。报告路径默认 `reports/lynis-report.dat`（相对 `tsa/` 目录解析）。
+**成功判据**：四行 `active`；健康为 `{"status":"ok"}`；Falco 有演示文件告警，BPF 有 `action:audit`；评分接口 HTTP 200 且 `data` 非空。在 Ubuntu 浏览器打开 `http://127.0.0.1:8766/` 看事件；此地址不是 Windows 宿主机的地址。规则名可能是官方 `Write below etc`，不要求一定命中项目规则名。
 
-## 5. 克隆并部署
+无桌面的服务器可通过已有、经过认证的 SSH 连接转发：在自己的电脑执行 `ssh -N -L 127.0.0.1:18766:127.0.0.1:8766 用户名@Ubuntu地址`，再访问 `http://127.0.0.1:18766/`；不要为此把看板开放到 `0.0.0.0`。
 
-```bash
-# 使用不含空格等特殊字符的路径；通过有 sudo 权限的普通用户执行
-git clone https://github.com/rrenziho333-bot/linux-runtime-security-stack.git ~/linux-runtime-security-stack
-cd ~/linux-runtime-security-stack
-```
+需要验证阻断时，只将仓库 `policy.yaml` 中演示文件策略的 `mode: audit` 改成 `mode: enforce`，重新部署后再次写入，应得到 `Operation not permitted`，BPF 日志出现 `deny`。完成后改回 `audit` 并重新部署。只操作演示文件，不要拿系统关键文件做阻断实验。
 
-拉取 Go 依赖（仅完整模式需要，降级模式跳过）：现在已在项目根目录（有 `go.mod`），用登录用户（部署时也是这个用户编译）拉一次依赖到模块缓存，需要联网：
+服务失败或接口 503 时先看 `journalctl -u falco-modern-bpf -u bpf-lsm-controller -u tsa-fusion -u tsa-dashboard -n 80 --no-pager`。首次启动可能尚未开始采集，等待后再触发一次写入；服务 active 本身不等于检测成功。
 
-```bash
-# 不用 sudo，用你自己的账户（即稍后的 SUDO_USER）拉依赖
-/usr/local/go/bin/go env -w GOTOOLCHAIN=auto
-/usr/local/go/bin/go mod download
-```
+## 5. 规则与日常修改
 
-> 不联网的离线机器：在联网同架构机器上（clone 后）跑 `go mod download`，再把
-> `$(go env GOMODCACHE)` 整目录拷到目标机同路径，然后回到目标机部署。
+- 官方规则：`falco/official-rules/`，当前 93 条定义；默认禁用的规则不会被强制启用。
+- 添加自定义规则：`falco/rules.d/91-custom-rules.yaml`，将占位 `[]` 替换为规则列表；或在同目录增加 `*.yaml`。
+- 生效：`python3 falco/manage_rules.py check`，通过后执行 `sudo ./falco/deploy-host-falco.sh`。
+- 实际加载：`/etc/falco/falco.yaml` 指向 `/etc/falco/security-stack/rules/<规则包ID>/`；详细示例见 [FALCO_RULES.md](FALCO_RULES.md)。
+- 风险分配置：`tsa/policy_config.yaml`；修改后 `sudo systemctl restart tsa-fusion`。默认总分为 `0.4 * posture + 0.6 * runtime`，分数越低风险越高，不是安全认证。
 
-然后一键部署：
+规则随 main 克隆提供，但依赖、内核能力和基线仍需上述准备。控制器重启存在保护空窗；复现成功不等于生产环境已经完成补丁加固或全面安全验收。
 
-```bash
-sudo ./deploy-security-stack.sh
-```
-
-部署脚本依次：建维护标记 → 创建演示文件 `/etc/tsa-protected-demo`（如不存在）→ 部署 Falco 规则 → 探测内核 BPF LSM：有则跑 Go 测试、编译并校验 BPF 策略、装 `bpf-lsm-controller`、启动四个服务；无则跳过 Go 编译、自动降级、只起 Falco+TSA+看板三个服务 → 跑 Python 测试 → 清维护标记。
-
-## 6. 验证
-
-判据分四步：服务存活 → 触发检测 → 三组件各自确认 → 看板端到端。
-
-### 6.1 服务存活（基础门槛）
-
-```bash
-# 检测流水线三项（完整与降级模式都应为 active）
-systemctl is-active falco-modern-bpf tsa-fusion tsa-dashboard
-# 期望输出三行 active
-
-# 完整模式额外（内核有 BPF LSM）：
-systemctl is-active bpf-lsm-controller
-# active = 完整检测+阻断；inactive = 已降级为纯检测（见第 9 节，非故障）
-```
-
-预期输出样例：
-
-```text
-$ systemctl is-active falco-modern-bpf tsa-fusion tsa-dashboard
-active
-active
-active
-
-$ systemctl is-active bpf-lsm-controller    # 完整模式
-active
-# 降级模式此处是 inactive（属正常，非故障）
-```
-
-**成功判据①**：`falco-modern-bpf`、`tsa-fusion`、`tsa-dashboard` 三项必须 `active`。完整模式另要求 `bpf-lsm-controller` 为 `active`（降级模式为 `inactive` 属正常）。
-
-### 6.2 触发一次检测（audit 模式，不阻断）
-
-```bash
-echo "demo" | sudo tee -a /etc/tsa-protected-demo >/dev/null
-sleep 2
-```
-
-### 6.3 三组件分别确认各自检测生效
-
-**Falco 侧（广域检测，必有）：**
-
-```bash
-sudo tail -n 5 /var/log/falco/falco.json | jq
-# 期望：能看到针对 /etc/tsa-protected-demo 的报警。具体规则名取决于哪个先匹配：
-#   - 多数情况是自定义规则 "Monitor specific file access"（专门盯这个文件）
-#   - 也可能是官方规则 "Write below etc"（写 /etc 下文件就触发）
-# 两者出现任意一个即说明 Falco 检测链路生效。
-```
-
-预期输出样例（节选关键字段，实际命令行可能一行排开）：
-
-```json
-{
-  "rule": "Monitor specific file access",
-  "priority": "Warning",
-  "output": "Sensitive file opened (file=/etc/tsa-protected-demo access=openat user=root process=tee command=tee -a /etc/tsa-protected-demo)",
-  "output_fields": { "proc.name": "tee", "user.name": "root", "fd.name": "/etc/tsa-protected-demo" }
-}
-```
-
-**BPF LSM 侧（内核级决策，仅完整模式）：**
-
-```bash
-sudo tail -n 3 /var/log/bpf-lsm/events.jsonl | jq
-# 期望：含 policy_name=protect_demo_config、operation=write、action=audit 的事件
-# 降级模式没有此文件（bpf-lsm-controller 本就未启动，不是故障，见第 9 节）
-```
-
-预期输出样例：
-
-```json
-{
-  "source": "bpf_lsm",
-  "policy_id": 1001,
-  "policy_name": "protect_demo_config",
-  "action": "audit",
-  "operation": "write",
-  "result": 0,
-  "pid": 12345,
-  "uid": 0,
-  "command": "tee",
-  "device": "65024",
-  "inode": 1234567
-}
-```
-
-> `action=audit` 表示内核记录了这次写但允许它通过（audit 模式）；若策略是 enforce，
-> 这里会是 `action=deny` 且 `result=-1`，写操作被内核拒绝。
-
-**TSA 侧（融合评分，必有）：**
-
-```bash
-journalctl -u tsa-fusion -n 10 --no-pager
-# 期望：出现 Falco rule=... status=scored points=-N runtime=NN 的日志，
-#       表明事件已被 TSA 接收并计入风险评分
-curl -s http://127.0.0.1:8766/healthz
-# 期望：{"status":"ok"}
-```
-
-预期输出样例：
-
-```text
-$ journalctl -u tsa-fusion -n 10 --no-pager
-... INFO ... Watching security event sources: falco=/var/log/falco/falco.json, ...
-... WARNING ... Falco rule=Monitor specific file access status=scored points=-5 runtime=95.00
-
-$ curl -s http://127.0.0.1:8766/healthz
-{"status":"ok"}
-```
-
-> `status=scored points=-5 runtime=95.00` 表示事件被计入风险，运行时分从 100 降到 95；
-> 若是 `status=duplicate` / `rate_limited` 则是去重/限速命中（也属正常工作）。
-
-### 6.4 看板端到端确认
-
-浏览器打开 `http://127.0.0.1:8766/`，确认：
-
-- 顶部"组件流水线"中 Falco / TSA 显示 `active`（绿色）；BPF LSM 项完整模式为 `active`，降级模式为非绿（未启动）属正常；
-- "风险评分"区有数值（posture/runtime/final）；
-- "最近操作与证据链"出现刚才 `tee` 写 `/etc/tsa-protected-demo` 的事件——完整模式是 Falco↔BPF 双侧证据链，降级模式只有 Falco 侧。
-
-### 6.5 一句话成功判据
-
-全部满足即运行成功：
-
-- `falco-modern-bpf` / `tsa-fusion` / `tsa-dashboard` 三服务 `active`；
-- 写 `/etc/tsa-protected-demo` 后：Falco 日志有报警、TSA 日志有 `scored` 评分、看板"证据链"出现该事件；
-- （完整模式）`bpf-lsm-controller` `active` 且 `/var/log/bpf-lsm/events.jsonl` 有 `action=audit` 事件；
-- （降级模式）BPF 两项可缺省，Falco + TSA + 看板三件成立即算纯检测成功。
-
-实时持续监测、盯日志命令见 [DEPLOYMENT.md](DEPLOYMENT.md) 第 2.2 节。
-
-### 6.6 风险评分怎么算
-
-对外接口 `GET /systemManage/risk/score` 返回三个分。搞懂它们，才知道分数是哪来的、靠不靠谱。
-
-**三个分：**
-
-| 分数 | 含义 | 来源 |
-|---|---|---|
-| `posture` | 静态基线分（系统配置层面的风险） | Lynis 检查（SSH、密码策略、防火墙、补丁等）。没装 Lynis 则恒 100 |
-| `runtime` | 运行时分（实时行为触发的风险） | Falco + BPF LSM 实时事件扣分 |
-| `final` | 最终风险分 | `posture×0.4 + runtime×0.6`（权重在 `tsa/policy_config.yaml` 的 `scoring.weights`） |
-
-满分 100，**越低越危险**。
-
-**一次操作怎么变成扣分（完整模式实例）：**
-
-写一次受保护文件：
-
-```bash
-echo test | sudo tee -a /etc/tsa-protected-demo >/dev/null
-```
-
-完整模式下，这一笔同时被两个检测源抓住：
-
-1. **Falco** 命中自定义规则 `Monitor specific file access` → 输出事件 → TSA 减 `runtime` 5 分（按 `policy_config.yaml` → `runtime_rules.specific_rules["Monitor specific file access"].points: 5`）。
-2. **BPF LSM** 内核 hook 命中策略 `protect_demo_config`、`audit` 模式 → 产生审计事件 → TSA 减 `runtime` 2 分（按 `policy_config.yaml` → `bpf_lsm.action_points.audit: 2`；若 `enforce` 拒绝则扣 8）。
-
-`tsa-fusion` 日志会同时记两条：
-
-```
-WARNING Falco rule=Monitor specific file access status=scored points=-5 runtime=95.00
-WARNING BPF LSM policy=protect_demo_config action=audit status=scored points=-2 runtime=93.00
-```
-
-降级模式没有 BPF LSM，只有第一条 Falco 那条。
-
-**扣分怎么定？两套规则：**
-
-- **按规则名定分**（`specific_rules`）：给每条 Falco 官方/自定义规则配固定分值。比如挖矿 `Detect crypto miners` 扣 20、你这条文件监控扣 5。TSA 拿到事件先查这张表。
-- **按严重级别兜底**（`priority_mapping`）：规则名没在 `specific_rules` 里，就按 Falco 报告的 `priority` 扣——`EMERGENCY:40、ALERT:30、CRITICAL:20、ERROR:10、WARNING:5、NOTICE:2`。
-
-**分数会自动回血，不是永久累积：**
-
-每个事件扣的风险有寿命（`risk_ttl_seconds`）。你这条事件是 3600 秒（1 小时）——1 小时内没新事件，这 5/2 分自动回升，`runtime` 慢慢回到 100。不同严重级别过期时间不同（`risk_ttl_by_priority`：DEBUG 5 分钟、CRITICAL 24 小时）。日志里会看到 `Runtime score recovered by N to NN`。
-
-也就是说，分数反映的是**当前还有多少未过期的风险**，不是"累犯了多少次"。系统安静一段时间，分就回满。
-
-**防刷机制（防一个动作刷爆分数）：**
-
-`event_control` 限三道：
-
-- `dedup_window`（秒）：窗口期内同一规则重复事件只算一次。
-- `max_points_per_minute`：每分钟最多扣这么多分。
-- `max_active_points_per_rule`：单条规则累计最多扣这么多分。
-
-所以你连续 `echo` 十次，只扣一次的分；不会因重复操作把 `runtime` 刷到 0。
-
-**想看实际扣分配置：**
-
-全在 `tsa/policy_config.yaml`：`scoring.weights`（权重）、`runtime_rules.specific_rules`（每条 Falco 规则的扣分）、`runtime_rules.priority_mapping`（优先级兜底）、`bpf_lsm.action_points`（BPF 审计/拒绝各扣几分）、`baseline_lynis.deduct_by_control`（Lynis 各控制项扣几分）。
-
-## 7. 关于 Falco 规则数量与安装位置
-
-新机器部署默认使用仓库 `falco/official-rules/` 中的三份固定官方规则：当前 25 + 37 + 31 = 93 条定义，以及 `falco/rules.d/` 的项目规则。官方文件由 `falco/rules.lock.json` 校验，不依赖系统包是否附带 sandbox/incubating 文件。
-
-定义不等于启用：保留上游的 `enabled: false`、本机 Falco 启用开关、优先级和例外，不会为了凑数量强行启用全部规则。TSA 的 `specific_rules` 只是扣分映射，也不是新增检测规则。
-
-部署前用本机 Falco 校验整个候选规则集，通过后安装到 `/etc/falco/security-stack/rules/<规则包ID>/`，更新 `falco.yaml` 的 `rules_files`。系统官方文件不覆盖，本机额外规则保留；缺失、不兼容或锁不匹配时明确失败，不悄悄减少规则。
-
-自定义规则请编辑 `falco/rules.d/91-custom-rules.yaml`，不要手工把官方快照复制到 `/etc/falco/`。完整的新机步骤、路径地图、添加/删除规则和验证示例见 [FALCO_RULES.md](FALCO_RULES.md)。
-
-## 8. 一览检查清单
-
-**必选（检测流水线，对应完整或降级模式）：**
-- [ ] `/sys/kernel/btf/vmlinux` 存在（modern eBPF，Falco 强依赖）
-- [ ] `falco --version` 可用
-- [ ] （可选）`lynis` 已安装
-- [ ] `sudo ./deploy-security-stack.sh` 全程无错
-- [ ] `falco-modern-bpf`、`tsa-fusion`、`tsa-dashboard` 三项 `active`
-
-**完整模式额外（启用内核级阻断时）：**
-- [ ] `/usr/local/go/bin/go version` 输出 1.25.x，依赖已缓存（降级模式无需 Go）
-- [ ] `grep CONFIG_BPF_LSM /boot/config-$(uname -r)` 输出 `=y`
-- [ ] `grep -w bpf /sys/kernel/security/lsm` 含 `bpf`
-- [ ] `bpf-lsm-controller` `active`（inactive 则为降级，非故障，见第 9 节）
-
-## 9. 内核达不到 BPF LSM 时的降级运行
-
-当 1.1 实测确认内核没有 `CONFIG_BPF_LSM=y`（很多 Ubuntu 及 CentOS 8/Stream 即如此），又不便换内核时，项目会自动降级为纯检测模式：失去 BPF LSM 内核级阻断，但保留 Falco 检测 + TSA 评分 + 看板证据链。
-
-降级依据：BPF LSM 是本项目的独立组件，TSA 只读 Falco 日志就能工作，不依赖 BPF LSM。Falco 的 modern eBPF 驱动基于 tracepoint/kprobe，只需要 BTF + CAP_BPF，不需要 BPF LSM。
-
-### 9.1 自动降级（默认）
-
-`deploy-security-stack.sh` 会在开头探测 `/sys/kernel/security/lsm` 是否含 `bpf`：
-
-- 含 `bpf` → 完整部署（检测 + 阻断，四个服务全部 active）。
-- 不含 `bpf` → 自动降级：
-  - 跳过 Go 编译和 `bpf-lsm-controller` 的安装、启动（不用装 Go 工具链）；
-  - 自动把 `tsa/policy_config.yaml` 的 `bpf_lsm.enabled` 置为 `false`，避免 TSA 盯不存在的日志；
-  - 仍安装并启动 Falco + TSA + 看板；结尾打印 `DETECTION-ONLY mode` 提示。
-
-一条 `sudo ./deploy-security-stack.sh` 就自动适配，不用人工判断，也不会因缺 BPF LSM 中断。降级后 `systemctl is-active bpf-lsm-controller` 显示 `inactive` 是预期，不是故障。
-
-### 9.2 手动确认 / 回到完整模式
-
-```bash
-# 确认当前模式
-grep -w bpf /sys/kernel/security/lsm && echo "完整模式可用" || echo "当前为降级模式"
-
-# 若内核后来补上了 BPF LSM（换内核/改 lsm= 引导参数后），重新部署即自动切回完整模式
-sudo ./deploy-security-stack.sh
-```
-
-### 9.3 降级后的能力对比
-
-| 能力 | 完整模式（有 BPF LSM） | 降级模式（无 BPF LSM） |
-|---|---|---|
-| 行为检测 | Falco + BPF LSM | 仅 Falco |
-| 内核级阻断 | `enforce` 返回 -EPERM | ✗ 无（Falco 本身只报警） |
-| 风险评分 | TSA（posture + runtime） | 同左（runtime 只来自 Falco） |
-| 证据链看板 | Falco↔BPF 关联 | 仅 Falco 事件链 |
-| 内核门槛 | BPF LSM + BTF | 仅 BTF |
-
-> 需要保留阻断能力的替代方案：用 Falco 的响应引擎（`falcoctl` / Falcosecurity 的 `priority` 动作 / 事件驱动脚本）在用户态对接 auditd 或自定义处置。但这偏离本项目"内核 LSM 决策"的定位，需额外开发，不在当前范围内。
-
-## 10. 分析 Falco 官方规则
-
-`falco/official-rules/` 现在是默认部署的规则来源，不再仅供分析。普通用户 clone 后无需重新拉取。以下命令仅供维护者更新官方规则；应选择明确的上游来源并审查差异，不能用一台机器的偶然状态代替统一版本。
-
-```bash
-# 维护者可选：从指定本机规则文件更新仓库副本
-./falco/fetch-official-rules.sh
-
-# 没装 falco 时：从官方 release 下载 tarball（URL 自行从 release 页复制）
-./falco/fetch-official-rules.sh --remote-url \
-  https://github.com/falcosecurity/rules/releases/download/<tag>/falco_rules.tar.gz
-
-# 或只下载单个规则文件
-./falco/fetch-official-rules.sh --remote-url-file <url> falco_rules.yaml
-# 查看 help
-./falco/fetch-official-rules.sh --help
-```
-
-拉取会更新对应 YAML 和 `VERSION.txt`。审查来源与差异后，运行 `python3 falco/manage_rules.py lock` 显式刷新锁，再运行 `python3 falco/manage_rules.py check` 和回归测试，将规则与锁一起提交；未刷新锁会拒绝部署。添加自己的规则不需要更新官方规则锁。
-
-> remote 模式不硬编码 URL：`falcosecurity/rules` 各 release 的 asset 命名不一致，需从 https://github.com/falcosecurity/rules/releases 复制实际 asset 地址传入。
-
-分析示例：
-
-```bash
-# 官方规则总数（三个文件合计，未去重）
-grep -c '^- rule:' falco/official-rules/*.yaml
-# 找提权相关规则
-grep -B1 -A6 'privilege\|escalat' falco/official-rules/*.yaml | head -40
-# 看 TSA 评分映射覆盖了多少官方规则
-grep '^- rule:' falco/official-rules/*.yaml | sed 's/.*- rule: //' \
-  | sort -u | while read r; do grep -q "\"$r\"" tsa/policy_config.yaml && echo "已配权重: $r"; done | wc -l
-```
-
-> 必须在目标 Falco 引擎上校验规则兼容性，并评估新增规则的误报、性能及评分权重。锁定内容不代表所有规则启用，也不代表覆盖全部攻击。
+安装来源：[Ubuntu 镜像说明](https://developer.aliyun.com/mirror/ubuntu)、[Falco 官方包安装](https://falco.org/docs/setup/packages/)、[Go 官方下载](https://go.dev/dl/)。

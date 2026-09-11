@@ -28,31 +28,16 @@ SHA256 固定内容，不证明原快照的上游发布身份；历史文件没�
 
 ## 2. 在新机器部署
 
-`git clone` 只下载代码，不会安装内核能力或启动软件。本项目支持 systemd Linux；已验证 Ubuntu 22.04.5、内核 6.8、Falco 0.42.1。不是所有 Linux 发行版都能无前置直接运行。
+首次安装只需按 [Ubuntu 复现指南](INSTALL.md) 完成依赖、内核、克隆、基线和部署；main 已包含完整仓库规则集，无需切换开发分支。本页是规则维护参考，不是另一套安装流程。
 
-1. 按 [INSTALL.md](INSTALL.md) 安装 Falco、Python 3、PyYAML；完整阻断模式准备符合 `go.mod` 的 Go 和启用了 BPF LSM 的内核。
-2. 直接 clone 默认分支 `main`，即可取得完整仓库规则集和部署功能，无需切换开发分支：
+整套项目已经部署后，在项目根目录校验并更新规则：
 
 ```bash
-git clone https://github.com/rrenziho333-bot/linux-runtime-security-stack.git
-cd linux-runtime-security-stack
 python3 falco/manage_rules.py check
+sudo ./falco/deploy-host-falco.sh
 ```
 
 `check` 使用本机 Falco 校验整个候选规则集，包含需要保留的主机规则；不会修改运行配置或重启服务。权限不足时用 sudo。缺文件、校验和不匹配、宏引用或引擎不兼容都会失败，不会悄悄回退为较少的系统规则。
-
-3. 按 [QUICKSTART.md](QUICKSTART.md) 下载 Go 模块并准备 Lynis 基线，再部署整套服务：
-
-```bash
-sudo ./deploy-security-stack.sh
-# 使用独立 Go 时：sudo GO_BIN=/绝对路径/go ./deploy-security-stack.sh
-```
-
-如果整套项目已经部署，只更新 Falco 规则即可：
-
-```bash
-sudo ./falco/deploy-host-falco.sh
-```
 
 ## 3. 安装后规则在哪里
 
