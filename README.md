@@ -5,6 +5,7 @@
 > 安全升级：看板改为仅本机访问，远程使用 SSH 转发或有鉴权的 TLS 代理；基线或采集不可用时评分接口返回 503，不再返回误导性高分。新增共享 mmap/mprotect 保护、事务化事件处理及回归测试，迁移步骤见 [安全审查与升级说明](docs/SECURITY_REVIEW.md)。
 
 - 从空白机器开始装前置：[docs/INSTALL.md](docs/INSTALL.md)
+- clone 后规则在哪里、如何添加自定义规则：[docs/FALCO_RULES.md](docs/FALCO_RULES.md)
 - 最快跑通（5 步，从 clone 到别人 curl 拿分）：[docs/QUICKSTART.md](docs/QUICKSTART.md)
 - 已装好前置、只需部署和实时检测：[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)
 - Ubuntu 真机内核、故障恢复和端到端验证：[docs/VM_VALIDATION.md](docs/VM_VALIDATION.md)
@@ -76,7 +77,7 @@ echo test | sudo tee -a /etc/tsa-protected-demo >/dev/null
 ## 4. 当前实现
 
 - Falco（本轮实测 0.42.1，modern eBPF 主机版驱动；部署脚本兼容会改 `rules_files`/输出配置的多个 Falco 版本，见 [docs/INSTALL.md](docs/INSTALL.md) §7）；
-- 检测规则 = Falco 官方规则集 + 1 条自定义文件监控规则（`falco/rules.d/`）；官方规则快照已入库可直接读（`falco/official-rules/`）；TSA 为其中 86 条官方规则配了扣分权重；
+- 检测规则默认来自仓库 `falco/official-rules/` 的 93 条官方定义（SHA256 锁定）和 `falco/rules.d/` 的项目规则；添加规则从 `91-custom-rules.yaml` 开始。安装至独立版本目录，不依赖本机已有官方规则数量，不覆盖本机额外规则；定义数量不等于全部启用，详见 [规则指南](docs/FALCO_RULES.md)；
 - BPF 策略用 YAML 配置，默认 `audit` 模式；
 - TSA 用 SQLite 持久化，支持去重、限速、风险过期、重启恢复；
 - Web 看板每 2 秒刷新服务状态、策略、评分和事件证据链；
@@ -135,8 +136,10 @@ curl http://127.0.0.1:8766/systemManage/risk/score
 ├── policy.yaml                 # 当前保护对象与 audit/enforce 模式
 ├── falco/
 │   ├── rules.d/                # 自定义 Falco 规则与例外
-│   ├── official-rules/         # 官方规则快照（93 条，供分析阅读）
-│   └── fetch-official-rules.sh # 更新官方规则快照
+│   ├── official-rules/         # 默认部署的固定官方规则（93 条定义）
+│   ├── rules.lock.json         # 官方规则校验和与数量
+│   ├── manage_rules.py         # 校验、安装版本化规则包
+│   └── fetch-official-rules.sh # 维护者更新官方规则来源
 ├── tsa/
 │   ├── tsa_core.py             # 事件融合、去重、评分和持久化
 │   ├── tsa_fusion.py           # TSA 服务入口

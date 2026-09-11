@@ -1,0 +1,4 @@
+# Add your project-specific rules here, or create another *.yaml in this folder.
+# This empty list is valid and does not enable any extra alerts.
+# Instructions and a complete example: ../../docs/FALCO_RULES.md
+[]

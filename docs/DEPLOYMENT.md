@@ -161,13 +161,14 @@ tee 请求 write
 ./falco/rules.d/
 ```
 
-修改后执行部署脚本。脚本会加载官方规则、自定义规则和例外做完整校验，校验通过才重启 Falco：
+从 `91-custom-rules.yaml` 添加自己的规则；官方规则固定在仓库 `falco/official-rules/`，由 `rules.lock.json` 校验。先校验，再只更新 Falco：
 
 ```bash
-sudo ./deploy-security-stack.sh
+python3 falco/manage_rules.py check
+sudo ./falco/deploy-host-falco.sh
 ```
 
-Falco 只负责报警，不承担阻断。
+规则安装至 `/etc/falco/security-stack/rules/<规则包ID>/`，不是覆盖系统包文件；本机额外规则保留。完整位置说明及可复制示例见 [FALCO_RULES.md](FALCO_RULES.md)。Falco 只负责报警，不承担阻断。
 
 ## 6. 修改 BPF LSM 策略
 
@@ -227,10 +228,7 @@ sudo tail -n 20 /var/log/bpf-lsm/events.jsonl
 Falco 规则错误：
 
 ```bash
-sudo falco -V /etc/falco/falco_rules.yaml \
-  -V /etc/falco/falco-sandbox_rules.yaml \
-  -V /etc/falco/falco-incubating_rules.yaml \
-  -V /etc/falco/rules.d
+sudo python3 falco/manage_rules.py check
 sudo falco --dry-run
 journalctl -u falco-modern-bpf -n 30 --no-pager
 ```

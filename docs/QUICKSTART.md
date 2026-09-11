@@ -2,6 +2,8 @@
 
 本指南适用于安全加固后的版本。已部署旧版本时先读 [升级说明](SECURITY_REVIEW.md)。看板仅监听回环地址；没有真实基线输入时不会默认给出安全满分。
 
+规则已随仓库提供：`falco/official-rules/` 是默认部署的官方规则，`falco/rules.d/91-custom-rules.yaml` 是自定义入口。部署无需再从目标机器收集官方规则；位置、示例与生效步骤见 [FALCO_RULES.md](FALCO_RULES.md)。
+
 ## 1. 准备 Linux
 
 在 x86_64 Linux 上按 [INSTALL.md](INSTALL.md) 安装 Falco、Python 3、PyYAML；完整 BPF 模式还需要 `/usr/local/go/bin/go`，版本满足 go.mod（至少 1.25，使用受支持版本的安全补丁）。修改 BPF C 时额外准备 clang、llvm、libbpf 头文件。
@@ -95,7 +97,7 @@ ssh -N -L 127.0.0.1:8766:127.0.0.1:8766 user@linux-host
 
 ## 6. 确认规则与阻断边界
 
-自定义规则在 `falco/rules.d/`，部署后复制到 `/etc/falco/rules.d/`。官方规则实际由 Falco 配置加载；仓库 `falco/official-rules/` 的 93 条是阅读快照，不能当作本机已启用数量。
+部署使用仓库锁定的 93 条官方规则定义和 `falco/rules.d/` 中的自定义规则，安装至 `/etc/falco/security-stack/rules/<规则包ID>/`，并更新 `falco.yaml` 的 `rules_files`。本机额外规则保留；缺文件、锁不匹配或不兼容时停止，不回退为较少规则。定义数量不代表全部启用。先用 `python3 falco/manage_rules.py check` 校验；详见 [规则指南](FALCO_RULES.md)。
 
 `audit` 不阻断；必须加载 `enforce` 策略才能拒绝操作。第一次只对演示文件测试，同时核对操作失败、BPF deny 事件和看板结果。新增 mmap/mprotect hooks 不会撤销加载策略前已有的共享可写映射，切换模式后应重启相关实验进程。
 

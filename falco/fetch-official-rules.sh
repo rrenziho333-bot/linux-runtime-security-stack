@@ -1,13 +1,11 @@
 #!/usr/bin/env bash
-# Mirror Falco's official rule sets into ./official-rules/ so they can be read
-# and analysed directly from the repository. The deployed rules remain the ones
-# shipped by the installed falco package (see deploy-host-falco.sh); this is a
-# read-only copy for analysis, kept out of git.
+# Maintainer tool: update the repository's official rule bundle. Review the
+# source and diff, then explicitly run manage_rules.py lock and check before
+# committing or deploying. This command does not install rules or refresh locks.
 #
 # Strategy (in order, first success wins):
 #   1. LOCAL: copy from the running falco install (default /etc/falco).
-#      This is the most accurate — it is exactly the rule set that will be
-#      deployed on this host. Recommended when falco is already installed.
+#      This selects the host package's files, not the project's managed bundle.
 #   2. REMOTE: download a release archive you point at with --remote-url.
 #      Go to https://github.com/falcosecurity/rules/releases (or the falco
 #      package release), copy the asset URL, and pass it here. The asset naming
@@ -123,8 +121,8 @@ write_version() {
 source=${source}
 fetched_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 files=${FILES[*]}
-This directory mirrors Falco's official rules for offline analysis only.
-The deployed rules remain those shipped by the installed falco package.
+This directory contains the repository's default deployment rule bundle.
+Review the upstream provenance and changes before running manage_rules.py lock.
 EOF
 }
 
@@ -138,4 +136,6 @@ fi
 
 echo
 echo "Done. ${#FILES[@]} files in ${DEST_DIR}/"
+echo "Review the diff, then run: python3 ${SCRIPT_DIR}/manage_rules.py lock"
+echo "Validate before deployment: python3 ${SCRIPT_DIR}/manage_rules.py check"
 echo "Analyse with, e.g.: grep -c '^- rule:' ${DEST_DIR}/falco_rules.yaml"
