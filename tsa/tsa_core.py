@@ -307,21 +307,14 @@ class RulePolicy:
     max_points_per_minute: int
     risk_ttl_seconds: int
     enabled: bool = True
-    explicit: bool = False
 
 
 class RiskScorer:
     def __init__(self, config: Mapping[str, Any], store: StateStore):
         self.config = config
         self.store = store
-        runtime_cfg = config.get("runtime_rules", {}) or {}
-        self.runtime_score = float(
-            store.get("runtime_score", runtime_cfg.get("init_score", 100))
-        )
         posture = store.get("posture_score", None)
         self.posture_score = float(posture) if posture is not None else None
-        self.last_attack_time = float(store.get("last_attack_time", 0.0))
-        self.last_recovery_time = float(store.get("last_recovery_time", 0.0))
         self.refresh_runtime_score(time.time())
 
     def set_posture_score(self, score: Optional[float]) -> None:
@@ -376,7 +369,6 @@ class RiskScorer:
                     ),
                 ),
                 enabled=bool(raw.get("enabled", True)),
-                explicit=True,
             )
         return RulePolicy(
             points=max(0, int(raw)),
@@ -385,7 +377,6 @@ class RiskScorer:
                 0, int(defaults.get("max_points_per_minute", 30))
             ),
             risk_ttl_seconds=self._risk_ttl(priority, defaults),
-            explicit=True,
         )
 
     def resolve_policy(
@@ -500,10 +491,6 @@ class RiskScorer:
                     max_points_per_minute=policy.max_points_per_minute,
                 )
 
-        if admitted > 0:
-            self.last_attack_time = now
-            self.store.set("last_attack_time", self.last_attack_time)
-
         record = {
             "priority": priority,
             "tags": tags,
@@ -613,10 +600,6 @@ class RiskScorer:
                 dedup_window=dedup_window,
                 max_points_per_minute=max_per_minute,
             )
-        if admitted > 0:
-            self.last_attack_time = now
-            self.store.set("last_attack_time", self.last_attack_time)
-
         record = {
             "policy_id": policy_id,
             "policy_name": policy_name,

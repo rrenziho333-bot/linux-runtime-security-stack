@@ -159,3 +159,16 @@ curl http://127.0.0.1:8766/systemManage/risk/score
 ```
 
 `lsmbpf_x86_bpfel.go/.o` 是 `bpf2go` 生成文件，`bpf-lsm-controller` 是构建产物，不是手写核心逻辑。
+
+## 7. 文件保留依据
+
+| 类别 | 为什么保留 |
+|---|---|
+| `falco/official-rules/*.yaml`、`rules.d/*.yaml`、`rules.lock.json` | 固定官方规则、自定义入口、必要例外与完整性校验；三份官方规则不是版本备份 |
+| `falco/manage_rules.py`、`deploy-host-falco.sh` | 前者校验并安装规则包，后者配置日志权限和 Falco 服务；总部署调用它们 |
+| `falco/fetch-official-rules.sh`、`extract_rule_snapshot.py`、`official-rules/VERSION.txt` | 规则更新、安全归档读取与来源追溯；不是日常启动步骤，也不是遗留副本 |
+| BPF C、`vmlinux.h`、生成的 `.go/.o`、Go 源码与 `go.mod/go.sum` | 支持重新生成、离线构建和实际内核加载；删除对象文件会使 Go embed 编译失败 |
+| TSA 源码与策略、`systemd/`、`logrotate/` | 采集、评分、看板、开机启动、权限及日志轮转均在部署链路内 |
+| Go/Python 测试、`.github/workflows/tests.yml` | 总部署和 CI 的回归检查；减少文件不能以去掉安全测试为代价 |
+
+本仓库只保留一套主机部署链路和一套 CI 测试入口。日志、数据库、工具链下载与控制器可执行文件属于本地产物，不提交 Git；不要清理已部署机器的历史证据或规则回滚备份。

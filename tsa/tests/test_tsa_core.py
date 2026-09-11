@@ -51,7 +51,6 @@ class RiskScorerTests(unittest.TestCase):
         return RiskScorer(
             {
                 "runtime_rules": {
-                    "init_score": 100,
                     "event_control": {
                         "dedup_window": 10,
                         "max_points_per_minute": 30,
@@ -72,6 +71,23 @@ class RiskScorerTests(unittest.TestCase):
         self.assertEqual(result["status"], "ignored")
         self.assertEqual(result["deducted_points"], 0)
         self.assertEqual(scorer.runtime_score, 100)
+
+    def test_restart_uses_active_events_not_legacy_recovery_state(self):
+        now = time.time()
+        scorer = self.scorer()
+        scorer.process_falco_event(falco_event("Current risk"), received_at=now)
+        for key in ("runtime_score", "last_attack_time", "last_recovery_time"):
+            self.store.set(key, "obsolete state")
+
+        restored = self.scorer()
+        self.assertEqual(restored.runtime_score, 95)
+        restored.process_bpf_lsm_event(
+            {"policy_id": 1001, "action": "deny", "pid": 123}, received_at=now
+        )
+        restored.process_falco_event(falco_event("Another risk"), received_at=now)
+        self.assertEqual(self.store.get("last_attack_time"), "obsolete state")
+        self.assertEqual(self.store.get("last_recovery_time"), "obsolete state")
+        self.assertLess(restored.runtime_score, 95)
 
     def test_maintenance_records_event_without_scoring(self):
         scorer = self.scorer({"specific_rules": {"Sensitive Rule": 10}})
@@ -144,7 +160,6 @@ class RiskScorerTests(unittest.TestCase):
     def test_bpf_lsm_events_are_scored_and_deduplicated(self):
         scorer = RiskScorer(
             {
-                "runtime_rules": {"init_score": 100},
                 "bpf_lsm": {
                     "action_points": {"audit": 2, "deny": 8},
                     "policy_points": {1001: {"deny": 10}},

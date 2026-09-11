@@ -19,12 +19,16 @@ linux-runtime-security-stack/
       95-security-stack-exceptions.yaml 项目例外，不是新的检测规则
     manage_rules.py                校验、安装和显示规则包信息
     deploy-host-falco.sh           安装规则并配置、重启 Falco
+    fetch-official-rules.sh        维护者获取新规则；日常部署不调用
+    extract_rule_snapshot.py       下载工具调用的安全归档解析器
   tsa/policy_config.yaml           告警扣分配置，不负责定义检测行为
 ```
 
 当前基准是 **93 条官方规则定义 + 1 条项目检测规则**。这不是“94 条全部启用”，也不是完整攻击覆盖保证：`enabled: false`、Falco 的 `rules` 开关、优先级、事件源、容器条件和例外仍然生效。sandbox/incubating 含实验性规则，生产环境应评估误报与性能。
 
 SHA256 固定内容，不证明原快照的上游发布身份；历史文件没有可靠 release tag，因此不会把版权年份冒充版本。更新官方规则是维护工作，不是新用户必须做的安装步骤。
+
+三份官方 YAML 分属不同规则集，当前 93 个规则名没有重复，不能删掉其中一份。`91-custom-rules.yaml` 虽然初始为空，但保留为自定义入口；`95-security-stack-exceptions.yaml` 调整宏和名单，避免将控制器自身行为误报，不是重复检测规则。官方来源与许可说明集中保留在 `official-rules/VERSION.txt` 和各 YAML 的原始许可头中。
 
 ## 2. 在新机器部署
 

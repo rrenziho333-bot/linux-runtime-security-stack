@@ -93,9 +93,6 @@ runtime_rules:
   start_at_end: true
   poll_interval: 1
   
-  # 初始运行时分数
-  init_score: 100 
-  
   # 风险按事件生命周期自动过期，而不是永久累计或全局缓慢回血。
   event_control:
     dedup_window: 60

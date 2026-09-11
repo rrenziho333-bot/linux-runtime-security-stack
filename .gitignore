@@ -14,8 +14,8 @@ okfile.txt
 /systemd/*.rendered
 /tsa/reports/*.dat
 
-# Falco official rules: a versioned snapshot is committed for offline analysis.
-# Re-fetch to match the installed falco version with falco/fetch-official-rules.sh.
+# Falco official rules: a locked snapshot is committed for deployment.
+# Updates require source review, an explicit lock refresh, and validation.
 # Only ignore transient editor/backup files here, not the committed snapshot.
 /falco/official-rules/*.tmp
 /falco/official-rules/*~
@@ -28,7 +28,3 @@ state/
 reports/
 __pycache__/
 *.pyc
-/tsa/state/
-/tsa/reports/
-/tsa/__pycache__/
-/tsa/tests/__pycache__/
