@@ -1,14 +1,12 @@
 # Ubuntu 复现指南
 
-安装与快速指南已合并。按顺序执行本文件即可，不必再看另一份安装文档。
-
 适用：Ubuntu 22.04 LTS x86_64、systemd、可 sudo 的普通用户；实验虚拟机建议 2 核、4 GB 内存、30 GB 磁盘，先做快照。终端和 APT 都需要能访问软件源、GitHub、Go 下载站与模块代理；受限网络先配置可用代理，只有浏览器能联网还不够。命令报错时先解决，再从失败命令继续，不要跳过校验或重新克隆覆盖已有目录。
 
-本路线已在新建官方 Ubuntu 22.04.5 镜像虚拟机实测，使用 6.8 HWE 内核、Falco 0.44.1、Go 1.26.8，默认完整模式但策略为 **audit（记录、放行）**。验证记录与限制见 [VM_VALIDATION.md 第 8 节](VM_VALIDATION.md#8-干净-ubuntu-从-main-复现)。
+已在干净 Ubuntu 22.04.5 虚拟机实测：6.8 HWE 内核、Falco 0.44.1、Go 1.26.8。默认 **audit（记录、放行）**；**enforce（拒绝操作）也已验证**，切换方法见第 4 节，结果见 [验证记录](VM_VALIDATION.md)。
 
 ## 1. 准备系统与内核
 
-在 Ubuntu 终端执行，不要使用 root 登录后直接部署。本机访问 Ubuntu 主源不稳定，以下使用阿里云 Ubuntu HTTPS 镜像，仍由 Ubuntu 签名验证软件包；保留原源文件备份（仅针对 22.04 的传统源文件）。已有可用源时可跳过前两条命令：
+使用 Ubuntu 普通用户执行，需提权时用 sudo。前两条命令备份并切换到阿里云 HTTPS 源，保留签名验证；已有可用源可跳过。
 
 ```bash
 sudo cp -n /etc/apt/sources.list /etc/apt/sources.list.lrss-backup
@@ -102,7 +100,7 @@ curl --fail http://127.0.0.1:8766/systemManage/risk/score
 
 无桌面的服务器可通过已有、经过认证的 SSH 连接转发：在自己的电脑执行 `ssh -N -L 127.0.0.1:18766:127.0.0.1:8766 用户名@Ubuntu地址`，再访问 `http://127.0.0.1:18766/`；不要为此把看板开放到 `0.0.0.0`。
 
-需要验证阻断时，只将仓库 `policy.yaml` 中演示文件策略的 `mode: audit` 改成 `mode: enforce`，重新部署后再次写入，应得到 `Operation not permitted`，BPF 日志出现 `deny`。完成后改回 `audit` 并重新部署。只操作演示文件，不要拿系统关键文件做阻断实验。
+**阻断验收（已实测）**：仅将仓库 `policy.yaml` 中 `id: 1001` 的 `mode` 改成 `enforce`，执行 `sudo GO_BIN="$HOME/.local/lib/lrss-go1.26.8/go/bin/go" ./deploy-security-stack.sh`，等待约 10 秒，再运行上面的写入命令。预期写入失败（`Operation not permitted` / `EPERM`），BPF 日志有 `action:deny`、`result:-1`，看板显示“已拦截”。完成后改回 `audit` 并重新部署。只测试演示文件，不要直接对系统关键文件启用阻断。
 
 服务失败或接口 503 时先看 `journalctl -u falco-modern-bpf -u bpf-lsm-controller -u tsa-fusion -u tsa-dashboard -n 80 --no-pager`。首次启动可能尚未开始采集，等待后再触发一次写入；服务 active 本身不等于检测成功。
 
@@ -113,6 +111,8 @@ curl --fail http://127.0.0.1:8766/systemManage/risk/score
 - 生效：`python3 falco/manage_rules.py check`，通过后执行 `sudo ./falco/deploy-host-falco.sh`。
 - 实际加载：`/etc/falco/falco.yaml` 指向 `/etc/falco/security-stack/rules/<规则包ID>/`；详细示例见 [FALCO_RULES.md](FALCO_RULES.md)。
 - 风险分配置：`tsa/policy_config.yaml`；修改后 `sudo systemctl restart tsa-fusion`。默认总分为 `0.4 * posture + 0.6 * runtime`，分数越低风险越高，不是安全认证。
+- 日志与数据：Falco `/var/log/falco/falco.json`，BPF `/var/log/bpf-lsm/events.jsonl`，SQLite `tsa/state/tsa.db`，最新评分报告 `tsa/reports/last_scan.json`。
+- Lynis 基线默认一天后过期；重新执行第 3 节的审计、chown/chmod 命令，再 `sudo systemctl restart tsa-fusion`。TSA 默认只读取报告，不会自动执行 Lynis。
 
 规则随 main 克隆提供，但依赖、内核能力和基线仍需上述准备。控制器重启存在保护空窗；复现成功不等于生产环境已经完成补丁加固或全面安全验收。
 
