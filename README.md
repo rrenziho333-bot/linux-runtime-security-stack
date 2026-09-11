@@ -4,22 +4,21 @@
 
 > 安全升级：看板改为仅本机访问，远程使用 SSH 转发或有鉴权的 TLS 代理；基线或采集不可用时评分接口返回 503，不再返回误导性高分。新增共享 mmap/mprotect 保护、事务化事件处理及回归测试，迁移步骤见 [安全审查与升级说明](docs/SECURITY_REVIEW.md)。
 
-- 从空白机器开始装前置：[docs/INSTALL.md](docs/INSTALL.md)
+- 从空白 Ubuntu 到部署验收（唯一复现入口）：[docs/INSTALL.md](docs/INSTALL.md)
 - clone 后规则在哪里、如何添加自定义规则：[docs/FALCO_RULES.md](docs/FALCO_RULES.md)
-- 最快跑通（5 步，从 clone 到别人 curl 拿分）：[docs/QUICKSTART.md](docs/QUICKSTART.md)
 - 已装好前置、只需部署和实时检测：[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)
 - Ubuntu 真机内核、故障恢复和端到端验证：[docs/VM_VALIDATION.md](docs/VM_VALIDATION.md)
-- 风险分怎么算：[docs/INSTALL.md](docs/INSTALL.md) §6.6
+- 风险分配置：[tsa/policy_config.yaml](tsa/policy_config.yaml)
 
-> **2026-09-11 安全加固版实测**：Ubuntu 22.04.5 LTS、kernel 6.8.0-60-generic、Falco 0.42.1、Go 1.26.8。内核阻断/放行及 13 项端到端检查通过，范围与未解决风险见 [验证报告](docs/VM_VALIDATION.md)。上游原版本另记录了 Falco 0.44.x 环境，不代表本轮已覆盖该版本。
+> **2026-09-11 干净 Ubuntu 实测**：另建官方 Ubuntu 22.04.5 镜像虚拟机，从 GitHub 直接克隆 main，按合并后的指南安装 kernel 6.8.0-138-generic、Falco 0.44.1、Go 1.26.8；真实告警、内核阻断、评分和整机冷启动恢复通过。需要可用网络与正确系统时间，不等于生产安全认证，详见 [验证报告第 8 节](docs/VM_VALIDATION.md#8-干净-ubuntu-从-main-复现)。
 
 ## 30 秒速览
 
 - 干什么的：在 Linux 主机上做运行时安全检测。Falco 按规则报警，BPF LSM 在内核对受保护文件做审计或阻断，TSA 融合事件算风险分，Lynis 给基线分。
-- 怎么跑：装好 Falco + Go 前置 → `sudo ./deploy-security-stack.sh` 一键部署。脚本会探测内核：有 BPF LSM 就检测+阻断，没有就自动降级为纯检测。
+- 怎么跑：按 [Ubuntu 复现指南](docs/INSTALL.md) 准备依赖、内核与基线，再运行部署脚本。有 BPF LSM 才有内核保护能力，默认策略为 audit。
 - 怎么验：`systemctl is-active` 看服务 → 写 `/etc/tsa-protected-demo` 触发检测 → 看板 `http://127.0.0.1:8766/` 看证据。
 - 怎么对接：经 SSH 转发或有鉴权的代理查询 `GET /systemManage/risk/score`；本机地址为 `http://127.0.0.1:8766/systemManage/risk/score`。
-- 跑不起来先看：前置装了吗（INSTALL §2、§3）？内核够新吗？CentOS 7 不行，需要 8/Stream 9 以上。
+- 跑不起来先看：依赖和 Go 路径是否正确？BTF/BPF LSM 是否可用？基线报告是否完整且新鲜？
 
 ## 1. 一张图理解项目
 
@@ -76,7 +75,7 @@ echo test | sudo tee -a /etc/tsa-protected-demo >/dev/null
 
 ## 4. 当前实现
 
-- Falco（本轮实测 0.42.1，modern eBPF 主机版驱动；部署脚本兼容会改 `rules_files`/输出配置的多个 Falco 版本，见 [docs/INSTALL.md](docs/INSTALL.md) §7）；
+- Falco（modern eBPF 主机版驱动；已测版本和范围见 [验证报告](docs/VM_VALIDATION.md)）；
 - 检测规则默认来自仓库 `falco/official-rules/` 的 93 条官方定义（SHA256 锁定）和 `falco/rules.d/` 的项目规则；添加规则从 `91-custom-rules.yaml` 开始。安装至独立版本目录，不依赖本机已有官方规则数量，不覆盖本机额外规则；定义数量不等于全部启用，详见 [规则指南](docs/FALCO_RULES.md)；
 - BPF 策略用 YAML 配置，默认 `audit` 模式；
 - TSA 用 SQLite 持久化，支持去重、限速、风险过期、重启恢复；
@@ -92,19 +91,19 @@ git clone https://github.com/rrenziho333-bot/linux-runtime-security-stack.git
 cd linux-runtime-security-stack
 ```
 
-官方规则在 `falco/official-rules/`，自定义规则在 `falco/rules.d/91-custom-rules.yaml`。克隆只下载文件；规则需要部署后才会加载，默认禁用的规则不会被强制启用。完整 BPF 功能还取决于主机内核能力，按 [快速指南](docs/QUICKSTART.md) 准备依赖与基线后部署。
+官方规则在 `falco/official-rules/`，自定义规则在 `falco/rules.d/91-custom-rules.yaml`。克隆只下载文件；规则需要部署后才会加载，默认禁用的规则不会被强制启用。完整 BPF 功能还取决于主机内核能力。
 
-从空白机器开始时，先看 [docs/INSTALL.md](docs/INSTALL.md) 安装前置，再按快速指南准备基线，否则部署或健康检查会失败。
+从空白机器开始时，只需按 [Ubuntu 复现指南](docs/INSTALL.md) 准备依赖、内核与基线，再部署验收。
 
 ```bash
-sudo ./deploy-security-stack.sh
+sudo GO_BIN="$HOME/.local/lib/lrss-go1.26.8/go/bin/go" ./deploy-security-stack.sh
 systemctl is-active falco-modern-bpf bpf-lsm-controller tsa-fusion tsa-dashboard
 # 完整模式四项 active；降级模式 bpf-lsm-controller 为 inactive（正常，见文档）
 ```
 
 部署脚本按当前 `SUDO_USER` 和目录生成 systemd unit。目录使用英文字符、数字、`/`、`_`、`-`、`.`，例如 `/home/alice/linux-runtime-security-stack`。用部署用户执行 sudo，详见 [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)。
 
-脚本会探测内核是否支持 BPF LSM：支持就部署完整模式（检测+阻断，四个服务都 active）；不支持就自动降级为纯检测（跳过 `bpf-lsm-controller`，关闭 TSA 的 BPF 日志源，对应 `is-active` 显示 inactive），Falco + TSA + 看板照常工作。降级细节见 [docs/INSTALL.md](docs/INSTALL.md) 第 9 节。
+脚本会探测内核是否支持 BPF LSM：支持就部署完整模式（四个服务，策略默认 audit）；不支持就通过运行参数关闭 TSA 的 BPF 日志源，保留 Falco + TSA + 看板，不修改源 YAML。纯检测不等于完成内核阻断复现。
 
 判断当前是哪种模式：
 

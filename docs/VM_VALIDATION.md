@@ -1,8 +1,8 @@
 # Ubuntu 虚拟机验证报告
 
-日期：2026-09-11。分支：`codex/security-hardening`。
+日期：2026-09-11。第 1 至 7 节为此前 `codex/security-hardening` 的历史记录，已随 PR #1 合并 main；本次干净系统复现见第 8 节。
 
-后续规则部署更新见第 6 节；第 1 至 5 节保留此前提交的验证范围，不把历史结果当作所有后续变更的自动证明。
+后续规则部署更新见第 6 节；各节保留当时的验证范围，不把历史结果当作所有后续变更的自动证明。历史节中的“未冷启动”“未自动合并”等描述仅针对当轮实验。
 
 验证基线为安全修复提交 `e263e7fe5c15fcf76b69e8920aaf3e88d6255ca5`，加上本报告所在提交的 `GO_BIN` 部署支持和扩展内核测试。没有修改产品内核逻辑或评分逻辑来迎合测试。
 
@@ -72,7 +72,7 @@ Falco 默认只报告第一条匹配规则；写演示文件实际可能命中�
 
 ## 4. 可重复验证
 
-先阅读 [QUICKSTART.md](QUICKSTART.md)，在有快照、BPF LSM 和 BTF 的实验虚拟机安装依赖、准备真实基线。以下命令假设已将选定的 Go 工具链加入 `PATH`，且位于项目根目录。
+先阅读 [Ubuntu 复现指南](INSTALL.md)，在有快照、BPF LSM 和 BTF 的实验虚拟机安装依赖、准备真实基线。以下命令假设已将选定的 Go 工具链加入 `PATH`，且位于项目根目录。
 
 ```bash
 go version
@@ -102,7 +102,7 @@ curl --fail http://127.0.0.1:8766/systemManage/risk/score
 
 正常的非特权 Go 测试会跳过内核集成用例；看到 `SKIP` 不能当作实际阻断通过。`go generate` 会更新生成物，应在专用验证 checkout 运行。
 
-部署后按 QUICKSTART 触发演示文件的 audit，再只对该演示文件切换 enforce，观察系统调用结果、两来源日志、SQLite 和看板关联。完成后恢复原策略。上述 13 项故障检查需要明确的服务停止/恢复、临时基线备份和日志轮转；不是 CI 默认执行内容，不能在生产机器照搬故障注入。
+部署后按复现指南触发演示文件的 audit，再只对该演示文件切换 enforce，观察系统调用结果、两来源日志、SQLite 和看板关联。完成后恢复原策略。上述 13 项故障检查需要明确的服务停止/恢复、临时基线备份和日志轮转；不是 CI 默认执行内容，不能在生产机器照搬故障注入。
 
 ## 5. 未解决的风险与边界
 
@@ -146,3 +146,44 @@ curl --fail http://127.0.0.1:8766/systemManage/risk/score
 完成后恢复默认规则包、audit 策略与全部服务，健康和评分接口均返回 200。测试事件保留，评分会因此下降；没有清空事件或重置分数。全部服务停止再启动不等于操作系统冷启动，本轮没有重启整台虚拟机。
 
 **合并建议：可以将本分支合并为已在上述环境验证的安全加固版本。** 第 5 节的生产边界仍然成立，尤其是控制器重启期间保护空窗与主机补丁问题；这些限制不能被测试通过或 GitHub 合并消除。建议合并不等于宣称项目不存在漏洞或已满足生产准入。
+
+## 8. 干净 Ubuntu 从 main 复现
+
+**结论：已在新的、未安装项目组件的 Ubuntu 虚拟机中，按合并后的 [唯一复现指南](INSTALL.md) 完成安装、部署和真实行为验证。** 不是在旧项目环境中重新运行部署脚本，也不是只模拟空规则目录。产品代码来自默认 `git clone` 得到的 main 提交 `72d09a3100384b9d23ac9dbab31a24451de57e72`；本轮仓库改动只合并、纠正文档，没有改动产品逻辑来通过测试。
+
+### 环境来源与前置处理
+
+- 用户另一台现有 Ubuntu 已有 Falco、Go、Lynis 与项目服务，不符合干净环境条件；只做检查，保留其原有系统与服务。
+- 另建 `LRSS-Clean-Ubuntu-22.04`：VMware Workstation 16.0.0、2 vCPU、4 GB、30 GB、NAT。使用 [Ubuntu 官方 Jammy cloud image](https://cloud-images.ubuntu.com/jammy/)，不是复用已有项目磁盘，也不是桌面 ISO 安装。
+- 下载的 `jammy-server-cloudimg-amd64.vmdk` 为 20260829 构建，SHA256 对照官方 HTTPS 清单通过：`95553d7df39a2dfaee134036af10d9f8f253726f637e2fc84d0b8ac66a378e95`。保留原始镜像与安装前快照 `clean-os-before-project-install`。
+- cloud-init 只创建实验账户与系统基础设置；初始清单确认没有 Falco、Go、Lynis、BPF/TSA 服务及项目配置。基础镜像已有 Python、Git、open-vm-tools，这不等于一个无任何软件的空磁盘。
+- 该旧 VMware 与本机 Hyper-V 环境下，较新虚拟硬件组合启动异常；新 VM 改用兼容的虚拟硬件版本 10、BIOS 与 E1000 后正常启动，没有关闭宿主机安全功能。此为本机建 VM 的兼容处理，不是项目安装步骤。
+- Ubuntu 主源及直连镜像下载不稳定：改用阿里云 HTTPS 镜像，并通过临时 SSH 反向转发使用宿主机代理供 APT、curl、Git、Go 下载。首次 APT 失败后从失败命令继续；最终依赖安装成功。未使用旧机器的 Git bundle/Go 缓存，未关闭 TLS、APT 签名或模块校验。
+- 曾观察 VMware 与 NTP 时间同步冲突；关闭 Tools 周期同步并恢复系统 NTP，时间正确后才生成基线。安装后冷启动再次检查 UTC 时间和同步状态。
+
+### 实际通过的检查
+
+将 `INSTALL.md` 的 7 个 Bash 代码块原文提取，在来宾中先做 `bash -n`，再按顺序以失败即停止的方式执行；依赖安装与 LSM 配置各经历一次真实重启。网络代理是上节明确记录的环境前置，不隐含在文档代码块中。
+
+| 检查 | 实际结果 |
+|---|---|
+| 系统与内核 | Ubuntu 22.04.5，运行 `6.8.0-138-generic`；BTF、`CONFIG_BPF_LSM=y` 正常；LSM 为 `lockdown,capability,landlock,yama,apparmor,bpf` |
+| 依赖与源码 | 官方签名包 Falco 0.44.1；Go 1.26.8 官方归档 SHA256 通过；直接 GitHub clone main，`go mod verify` 通过 |
+| 总部署 | 真实 Lynis 审计完成；部署中的 Go 常规测试、53 项 Python 测试通过；总部署退出 0，四个服务 active/enabled |
+| 仓库规则 | 无旧 Falco 配置的系统装入锁定的 93 条官方规则定义与项目规则；实际 Falco 校验通过，不依赖系统原有规则数量 |
+| 指南 audit 验收 | `tee` 写演示文件成功，Falco `Write below etc` 与 BPF `audit` 都有真实日志，进入 TSA；健康/评分 HTTP 200 |
+| 自定义读取规则 | 读取演示文件触发 `Monitor specific file access` 并入库 |
+| enforce 验收 | 仅将演示策略改为 enforce 后按指南重新部署，写入返回 `EPERM`，真实 deny 入库；随后恢复原 audit 策略并重新部署 |
+| 额外内核集成 | root 下 `BPF_LSM_INTEGRATION=1` 的 `TestBPFEnforceIntegration` 实际 PASS，涵盖六个 hooks 的阻断、audit 与允许 UID 路径，不是 SKIP |
+| 完整性与界面 | SQLite `integrity_check=ok`、源码 checkout 干净；看板只有回环监听，经 SSH 转发实开页面，显示双源证据、历史拦截和当前 audit，原始证据可展开 |
+| 整机冷启动 | 正常关机，确认 VM 已停止，再开机；boot ID 改变，四个服务自动 active/enabled，关机前 40 条事件 ID 全部保留，新的 Falco/BPF 事件继续入库 |
+
+首次指南验收时 API 为 `posture=85.0, runtime=86.0, final=85.6`；更多测试后分数下降。运行中 SSH、sudo、内核集成测试也可能命中官方规则，不能把这些告警直接当成真实入侵。没有清空事件以制造高分。
+
+### 结论的边界
+
+可以按指南在上述干净 Ubuntu 路线上复现完整实验功能；`git clone` 仍只下载源码，依赖、内核、网络和新鲜基线不能省略。指南与快速指南已合为 `INSTALL.md`，删除 `QUICKSTART.md`；其他文档仅为原理、维护和验证参考。
+
+新机 Lynis `hardening_index=57`，记录 `PKGS-7392` 软件包风险与 `FIRE-4512` 防火墙规则警告；本次没有执行整机补丁升级或生产账户加固。实验账户、网络与快照只用于隔离验证。复现成功不代表主机已经安全，也不代表 Falco 的所有默认禁用规则被启用。
+
+本轮没有在新机重新生成 BPF 对象、运行竞态检测或重做此前全部 13 项故障注入；那些历史结果仍按各节所列环境理解。未覆盖 Ubuntu 24.04/ARM、长时间压力、所有文件系统与跨浏览器视觉回归。控制器重启保护空窗等第 5 节的产品边界仍然成立。

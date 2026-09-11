@@ -2,9 +2,9 @@
 
 > 升级前先读 [SECURITY_REVIEW.md](SECURITY_REVIEW.md)。当前仅回环监听，不自动开端口；基线与采集未就绪时评分 API 返回 503。
 
-> 首次部署/新手请先看 [INSTALL.md](INSTALL.md)。本文档假设 Falco 和 Go 等前置已装好；从空白机器开始的，先按 INSTALL 装好前置再回来。
+> 首次部署只需按 [Ubuntu 复现指南](INSTALL.md) 完成安装与验收。本文是已有部署的运行参考，不是另一份必读安装指南。
 >
-> 适用于已装好前置的 Linux 主机（内核有没有 BPF LSM 都行：有就完整运行，没有就自动降级为纯检测，见 INSTALL 第 9 节）。命令以项目根目录为当前路径。
+> 适用于已装好前置的 Linux 主机（有 BPF LSM 才能完整运行，否则自动降级为纯检测）。命令以项目根目录为当前路径；使用独立 Go 时须传入绝对路径 `GO_BIN`。
 
 ## 1. 部署前确认
 
@@ -88,7 +88,7 @@ tail -f /var/log/falco/falco.json | jq
 # 检测流水线三项（完整与降级模式都应为 active）
 systemctl is-active falco-modern-bpf tsa-fusion tsa-dashboard
 
-# 完整模式额外：BPF 控制器（降级模式此为 inactive/disabled，属正常，见 INSTALL 第 9 节）
+# 完整模式额外：BPF 控制器（降级模式未启动，不能视为完整复现）
 systemctl is-active bpf-lsm-controller
 systemctl is-enabled bpf-lsm-controller
 ```
