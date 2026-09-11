@@ -1,0 +1,23 @@
+name: Security regression tests
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  linux-tests:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Install build and test dependencies
+        run: sudo apt-get update && sudo apt-get install -y clang llvm libbpf-dev python3-yaml
+      - name: Rebuild BPF bindings
+        run: go generate ./...
+      - name: Go tests and vet
+        run: go test -race ./... && go vet ./...
+      - name: Python tests
+        working-directory: tsa
+        run: python3 -m unittest discover -s tests -v
+      - name: Shell syntax
+        run: bash -n deploy-security-stack.sh falco/deploy-host-falco.sh falco/fetch-official-rules.sh

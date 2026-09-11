@@ -17,6 +17,10 @@ class DashboardDataTests(unittest.TestCase):
         self.db_path = self.root / "state.db"
         store = StateStore(self.db_path)
         store.set("posture_score", 80)
+        store.set("baseline_status", "ok")
+        store.set("fusion_status", "running")
+        store.set("fusion_heartbeat", time.time())
+        store.set("source_status", {"falco": True})
         store.close()
         self.config = self.root / "tsa.yaml"
         self.config.write_text(
@@ -169,6 +173,20 @@ policies:
         incident = DashboardData(self.config, self.policy).snapshot()["incidents"][0]
         self.assertEqual(incident["decision"], "已拦截")
         self.assertIn("-EPERM", " ".join(incident["steps"]))
+
+    @patch("tsa_dashboard.service_state", return_value="active")
+    def test_different_pids_are_not_paired_by_process_name(self, _service):
+        self.insert_event(source="falco", rule="test", payload={"pid": 5, "process": "tee", "file": "/etc/test"})
+        self.insert_event(source="bpf_lsm", rule="bpf_lsm:protect_test:audit",
+                          payload={"pid": 6, "command": "tee", "policy_name": "protect_test", "action": "audit"})
+        incidents = DashboardData(self.config, self.policy).snapshot()["incidents"]
+        self.assertEqual(len(incidents), 2)
+
+    @patch("tsa_dashboard.service_state", return_value="active")
+    def test_zero_weights_use_default_weights(self, _service):
+        data = DashboardData(self.config, self.policy)
+        data.config["scoring"] = {"weights": {"posture": 0, "runtime": 0}}
+        self.assertEqual(data.scores()["final"], 92)
 
 
 if __name__ == "__main__":

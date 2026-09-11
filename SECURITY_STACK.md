@@ -23,7 +23,7 @@
 device + inode → policy_id + mode + expires_at
 ```
 
-内核程序挂载四个 LSM hook：
+内核程序挂载六个 LSM hook：
 
 | Hook | 操作 |
 |---|---|
@@ -31,6 +31,8 @@ device + inode → policy_id + mode + expires_at
 | `inode_unlink` | 删除 |
 | `inode_rename` | 重命名或覆盖 |
 | `inode_setattr` | 修改属性 |
+| `mmap_file` | 新建共享可写文件映射 |
+| `file_mprotect` | 共享文件映射升级为可写 |
 
 决策顺序：
 
@@ -85,6 +87,8 @@ final = posture × 0.4 + runtime × 0.6
 - `allowed_uids` 只能表达 UID 白名单，尚未细化到可执行文件签名或 cgroup；
 - 强制模式必须先在 `audit` 中完成正常访问画像和回滚验证；
 - 当前评分权重属于项目策略，需要通过实验数据继续校准。
+- 已存在的共享可写映射不会被后加载的策略撤销，必须在相关进程启动前加载策略；从 audit 切到 enforce 时应重新启动相关工作负载。
+- 基线缺失、未完成、过期或采集停止时不提供有效总分；接口可用性、远程访问和事务化日志处理详见 [安全审查与升级说明](docs/SECURITY_REVIEW.md)。
 
 ## 构建说明
 

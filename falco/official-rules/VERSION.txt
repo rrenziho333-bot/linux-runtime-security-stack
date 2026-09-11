@@ -1,19 +1,18 @@
-source=manual:github-falcosecurity-rules
-fetched_utc=2026-07-16T17:42:00Z
+source=historical-manual:github-falcosecurity-rules
+source_url=https://github.com/falcosecurity/rules
+original_recorded_fetch_utc=2026-07-16T17:42:00Z
+upstream_release_tag=unknown
 files=falco_rules.yaml falco-sandbox_rules.yaml falco-incubating_rules.yaml
-rule_count=25+37+31=93 unique rules
-tsa_scored_mapping=86 of these rules have explicit deduction weights in tsa/policy_config.yaml
-snapshot_version=2025 (per Copyright 2025 in file headers; exact release tag unknown)
-version_note=This snapshot is newer than the README's target Falco 0.42.1 (2023). Rule names
-  mostly overlap, so the 86/93 scoring mapping still holds, but a few rules may be added,
-  renamed, or unweighted across versions. For analysis aligned to your installed falco,
-  regenerate this snapshot with fetch-official-rules.sh (local copy from /etc/falco).
+rule_definitions=25+37+31=93
+content_lock=../rules.lock.json (UTF-8 with LF newlines)
+deployment=repository bundle installed by ../manage_rules.py
 
-This directory mirrors Falco's official rules for offline analysis.
-Source: https://github.com/falcosecurity/rules (Apache-2.0).
-The deployed rules remain those shipped by the installed falco package;
-this is a committed snapshot for reading and analysis.
+The original snapshot did not record a verifiable upstream commit or release.
+Copyright years are not version identifiers. No upstream release provenance is
+inferred from the headers. The lock pins these exact repository contents only.
+The snapshot passed Falco 0.42.1 rule validation on Ubuntu on 2026-09-11.
+This is not a claim that all definitions are enabled or cover every threat.
 
-To regenerate with your installed falco version, run:
-  ../../falco/fetch-official-rules.sh            # from /etc/falco
-  ../../falco/fetch-official-rules.sh --remote-url <tarball-url>
+Maintainers: review the upstream source and diff, explicitly regenerate the
+lock with ../manage_rules.py lock, validate with check, test, then commit both
+the rule files and lock. Fetching alone never changes the installed bundle.

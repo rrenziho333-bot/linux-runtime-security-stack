@@ -195,6 +195,7 @@ class RiskScorerTests(unittest.TestCase):
 
 
 class RotatingLineReaderTests(unittest.TestCase):
+    @unittest.skipIf(os.name == "nt", "POSIX allows renaming an open file; Windows does not")
     def test_follows_append_and_rotation_without_replaying_old_file(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

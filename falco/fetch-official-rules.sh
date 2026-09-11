@@ -1,13 +1,11 @@
 #!/usr/bin/env bash
-# Mirror Falco's official rule sets into ./official-rules/ so they can be read
-# and analysed directly from the repository. The deployed rules remain the ones
-# shipped by the installed falco package (see deploy-host-falco.sh); this is a
-# read-only copy for analysis, kept out of git.
+# Maintainer tool: update the repository's official rule bundle. Review the
+# source and diff, then explicitly run manage_rules.py lock and check before
+# committing or deploying. This command does not install rules or refresh locks.
 #
 # Strategy (in order, first success wins):
 #   1. LOCAL: copy from the running falco install (default /etc/falco).
-#      This is the most accurate — it is exactly the rule set that will be
-#      deployed on this host. Recommended when falco is already installed.
+#      This selects the host package's files, not the project's managed bundle.
 #   2. REMOTE: download a release archive you point at with --remote-url.
 #      Go to https://github.com/falcosecurity/rules/releases (or the falco
 #      package release), copy the asset URL, and pass it here. The asset naming
@@ -80,12 +78,13 @@ fetch_remote_tar() {
   tmpdir="$(mktemp -d)"
   tarball="${tmpdir}/rules.tar.gz"
   echo "Downloading ${REMOTE_URL}"
-  if ! curl -fsSL "${REMOTE_URL}" -o "${tarball}"; then
+  if ! curl -fsSL --max-filesize 67108864 "${REMOTE_URL}" -o "${tarball}"; then
     echo "Download failed. Verify the URL points to a .tar.gz asset." >&2
     rm -rf "${tmpdir}"
     exit 1
   fi
-  tar -xzf "${tarball}" -C "${tmpdir}"
+  # Read only allowlisted regular members; never extract archive paths or links.
+  python3 "${SCRIPT_DIR}/extract_rule_snapshot.py" "${tarball}" "${tmpdir}"
   echo "Extracting official rules:"
   for f in "${FILES[@]}"; do
     local src
@@ -104,8 +103,12 @@ fetch_remote_tar() {
 
 fetch_remote_yaml() {
   [[ -n ${REMOTE_URL} && -n ${REMOTE_FILE} ]] || usage
+  case "${REMOTE_FILE}" in
+    falco_rules.yaml|falco-sandbox_rules.yaml|falco-incubating_rules.yaml) ;;
+    *) echo "Unsupported official rule filename: ${REMOTE_FILE}" >&2; exit 1 ;;
+  esac
   echo "Downloading ${REMOTE_FILE} from ${REMOTE_URL}"
-  if ! curl -fsSL "${REMOTE_URL}" -o "${DEST_DIR}/${REMOTE_FILE}"; then
+  if ! curl -fsSL --max-filesize 20971520 "${REMOTE_URL}" -o "${DEST_DIR}/${REMOTE_FILE}"; then
     echo "Download failed for ${REMOTE_URL}" >&2
     exit 1
   fi
@@ -118,8 +121,8 @@ write_version() {
 source=${source}
 fetched_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 files=${FILES[*]}
-This directory mirrors Falco's official rules for offline analysis only.
-The deployed rules remain those shipped by the installed falco package.
+This directory contains the repository's default deployment rule bundle.
+Review the upstream provenance and changes before running manage_rules.py lock.
 EOF
 }
 
@@ -133,4 +136,6 @@ fi
 
 echo
 echo "Done. ${#FILES[@]} files in ${DEST_DIR}/"
+echo "Review the diff, then run: python3 ${SCRIPT_DIR}/manage_rules.py lock"
+echo "Validate before deployment: python3 ${SCRIPT_DIR}/manage_rules.py check"
 echo "Analyse with, e.g.: grep -c '^- rule:' ${DEST_DIR}/falco_rules.yaml"

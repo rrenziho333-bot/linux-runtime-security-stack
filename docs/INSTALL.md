@@ -1,14 +1,16 @@
 # 空白 Linux 从零到可运行
 
+> 安全升级后的访问和验收方式见 [SECURITY_REVIEW.md](SECURITY_REVIEW.md)：仅回环监听；真实基线报告需完整且未过期；评分缺数据返回 503。旧版本“缺报告也满分”不再成立。
+
 面向一台全新安装、没配过安全栈的 Linux 主机，把它带到能成功跑 `sudo ./deploy-security-stack.sh`、检测流水线生效的状态。
 
-部署脚本没有硬编码路径，在任意目录都能跑。真正容易卡住的是两个前置：Falco 和 Go。BPF LSM 是可选的——有它就能做内核级阻断，没有就自动降级为纯检测（见第 9 节）。
+部署支持由英文字母、数字、`/`、`_`、`-`、`.` 组成的绝对路径。真正容易卡住的是两个前置：Falco 和 Go。BPF LSM 可选，没有时自动降级为纯检测。
 
 > 支持两个发行版系列：Ubuntu / Debian（apt）和 CentOS（dnf/yum）。每个步骤都给两种命令，任选其一。其他发行版按等价命令替换包管理器即可。
 
 ## 0. 适用平台与权限
 
-- x86_64 Linux 内核 ≥ 5.7（BPF LSM 引入版本），建议 ≥ 5.13（LSM hook 更全）。
+- x86_64 Linux，优先使用已验证系列的 6.8 内核，并实际检查 BTF/BPF LSM。5.7 是 BPF LSM 引入版本，不是当前整套程序的兼容性保证。
 - 全程需要 root（`sudo`）。部署脚本以 `SUDO_USER` 作为运行/构建账户。
 - 不支持 macOS / WSL1 / 无 BPF LSM 的内核端到端运行；TSA 纯软件部分可在任意平台跑单测。
 
@@ -201,7 +203,7 @@ TSA 配置默认 `run_lynis: false`，即只读 Lynis 报告、不主动执行�
 ## 5. 克隆并部署
 
 ```bash
-# 任意目录、任意有 sudo 权限的用户；Ubuntu / CentOS 命令一致
+# 使用不含空格等特殊字符的路径；通过有 sudo 权限的普通用户执行
 git clone https://github.com/rrenziho333-bot/linux-runtime-security-stack.git ~/linux-runtime-security-stack
 cd ~/linux-runtime-security-stack
 ```
@@ -419,47 +421,15 @@ WARNING BPF LSM policy=protect_demo_config action=audit status=scored points=-2 
 
 全在 `tsa/policy_config.yaml`：`scoring.weights`（权重）、`runtime_rules.specific_rules`（每条 Falco 规则的扣分）、`runtime_rules.priority_mapping`（优先级兜底）、`bpf_lsm.action_points`（BPF 审计/拒绝各扣几分）、`baseline_lynis.deduct_by_control`（Lynis 各控制项扣几分）。
 
-## 7. 关于 Falco 规则数量
+## 7. 关于 Falco 规则数量与安装位置
 
-项目自带的检测规则只有 1 条：`falco/rules.d/90-local-file-monitoring.yaml`（盯 `/etc/tsa-protected-demo` 的 open）。但实际生效的规则远不止此——部署时 `deploy-host-falco.sh` 会加载 Falco 官方规则集（`falco_rules.yaml` + `falco-sandbox_rules.yaml` + `falco-incubating_rules.yaml`，共 93 条，覆盖提权、容器逃逸、挖矿、反弹 shell、敏感文件读写等）。官方规则快照已入库到 `falco/official-rules/`，clone 后可直接阅读；要和本机已装 Falco 版本对齐，用 `falco/fetch-official-rules.sh` 重新拉取，见第 10 节。
+新机器部署默认使用仓库 `falco/official-rules/` 中的三份固定官方规则：当前 25 + 37 + 31 = 93 条定义，以及 `falco/rules.d/` 的项目规则。官方文件由 `falco/rules.lock.json` 校验，不依赖系统包是否附带 sandbox/incubating 文件。
 
-TSA 的 `tsa/policy_config.yaml` 里 `specific_rules` 为这 93 条中的 86 条配了扣分权重（其余走优先级兜底），这是评分映射，不是新增检测规则。`95-security-stack-exceptions.yaml` 是给官方规则打白名单补丁的 list/macro，也不算新增规则。
+定义不等于启用：保留上游的 `enabled: false`、本机 Falco 启用开关、优先级和例外，不会为了凑数量强行启用全部规则。TSA 的 `specific_rules` 只是扣分映射，也不是新增检测规则。
 
-所以实际保护覆盖是：官方规则广域检测 + 1 条自定义文件监控，再加上：
+部署前用本机 Falco 校验整个候选规则集，通过后安装到 `/etc/falco/security-stack/rules/<规则包ID>/`，更新 `falco.yaml` 的 `rules_files`。系统官方文件不覆盖，本机额外规则保留；缺失、不兼容或锁不匹配时明确失败，不悄悄减少规则。
 
-- 完整模式（有 BPF LSM）：叠加 BPF LSM 内核级精确决策/阻断；
-- 降级模式（无 BPF LSM）：仅 Falco 纯检测（无内核阻断）。
-
-> **不同 Falco 版本差异（部署脚本已自动处理，无须手动改）**：官方规则集随 Falco 版本变化，部署脚本会按本机实情适配，下面这些坑它都自己兜了，遇到不报错就是正常：
-> - 老的 `falco.yaml` 把 `falco-sandbox_rules.yaml`/`falco-incubating_rules.yaml` 列进 `rules_files`，Falco 0.44 默认不再列。`deploy-host-falco.sh` 会探测并把磁盘上实际存在的规则文件以正确顺序重排进 `rules_files`，不会硬匹配某个固定布局。
-> - `95-security-stack-exceptions.yaml` 用 `append` 给两个官方符号（`bpf_profiled_binaries`、`user_known_write_below_root_activities`）加白名单，但 Falco 0.44 已删这两个符号，`append` 一个不存在的符号会让 Falco 启动失败。部署时脚本会探测这些符号在不在本机官方规则里，不在的整段剥离、不报错。
-> - 老的 `json_output` 是 map（`enabled: true`），0.44 拍平成 scalar（`json_output: true`）。脚本探测形态生成匹配的 override。
-> 上面写"93 条/86 条"是项目实现的参考量级，**以你机器实际安装的 Falco 版本为准**——想看本机确切条数，把 `rules_files` 实际加载的每个文件数一遍：
-
-```bash
-sed -n '/^rules_files:/,/^[a-z]/p' /etc/falco/falco.yaml | grep '  -'    # 看加载了哪些
-grep -c '^- rule:' /etc/falco/falco_rules.yaml /etc/falco/falco-sandbox_rules.yaml /etc/falco/falco-incubating_rules.yaml 2>/dev/null
-```
-
-### 7.1 启用全量 90+ 官方规则（可选）
-
-Falco 包默认只装 Stable 主规则文件（`falco_rules.yaml`，约 25 条）。Sandbox（`falco-sandbox_rules.yaml`，实验性）和 Incubating（`falco-incubating_rules.yaml`，孵化中）默认不装，所以开箱只生效 25 条。要 93 条全量生效，把这两个文件补到 `/etc/falco/` 再重部署——仓库已入库一份与 Falco 0.44 实测兼容的全量快照，直接用：
-
-```bash
-cd ~/linux-runtime-security-stack    # 或你的项目目录
-sudo cp falco/official-rules/falco-sandbox_rules.yaml /etc/falco/
-sudo cp falco/official-rules/falco-incubating_rules.yaml /etc/falco/
-sudo ./deploy-security-stack.sh       # rules_files 会自动补上这两个文件
-```
-
-部署后确认生效：
-```bash
-sed -n '/^rules_files:/,/^[a-z]/p' /etc/falco/falco.yaml | grep '  -'   # 应含 sandbox + incubating
-grep -c '^- rule:' /etc/falco/falco_rules.yaml /etc/falco/falco-sandbox_rules.yaml /etc/falco/falco-incubating_rules.yaml
-# 25 + 37 + 31 = 93 条
-```
-
-> 仓库快照是某 Falco 版本下入库的全量规则，**已实测与 Falco 0.44 兼容**（`falco --dry-run` 通过）。若你装的 Falco 版本与快照差异较大、`falco --dry-run` 报规则语法不兼容，回滚（删掉这两个文件重部署），改从 `https://github.com/falcosecurity/rules/releases` 下与你的 Falco 对齐的 release 全量包，用 `falco/fetch-official-rules.sh --remote-url <tarball-url>` 拉取后再 copy。
+自定义规则请编辑 `falco/rules.d/91-custom-rules.yaml`，不要手工把官方快照复制到 `/etc/falco/`。完整的新机步骤、路径地图、添加/删除规则和验证示例见 [FALCO_RULES.md](FALCO_RULES.md)。
 
 ## 8. 一览检查清单
 
@@ -518,10 +488,10 @@ sudo ./deploy-security-stack.sh
 
 ## 10. 分析 Falco 官方规则
 
-本仓库在 `falco/official-rules/` 默认入库一份官方规则快照（93 条，带 `VERSION.txt` 标注版本来源），clone 后即可直接阅读。要和已装 Falco 版本对齐，用 `fetch-official-rules.sh` 重新拉取后再提交即可更新快照。推荐从本机已装的 Falco 拷贝——那正是实际部署用的同一份。
+`falco/official-rules/` 现在是默认部署的规则来源，不再仅供分析。普通用户 clone 后无需重新拉取。以下命令仅供维护者更新官方规则；应选择明确的上游来源并审查差异，不能用一台机器的偶然状态代替统一版本。
 
 ```bash
-# 推荐：从本机已装 falco 拷贝（/etc/falco 下的官方规则文件）
+# 维护者可选：从指定本机规则文件更新仓库副本
 ./falco/fetch-official-rules.sh
 
 # 没装 falco 时：从官方 release 下载 tarball（URL 自行从 release 页复制）
@@ -534,7 +504,7 @@ sudo ./deploy-security-stack.sh
 ./falco/fetch-official-rules.sh --help
 ```
 
-拉取到的三个 yaml 会覆盖 `falco/official-rules/` 中已入库的快照，并更新 `VERSION.txt` 记录来源。重新拉取后 `git add falco/official-rules/` 提交即可更新仓库快照。
+拉取会更新对应 YAML 和 `VERSION.txt`。审查来源与差异后，运行 `python3 falco/manage_rules.py lock` 显式刷新锁，再运行 `python3 falco/manage_rules.py check` 和回归测试，将规则与锁一起提交；未刷新锁会拒绝部署。添加自己的规则不需要更新官方规则锁。
 
 > remote 模式不硬编码 URL：`falcosecurity/rules` 各 release 的 asset 命名不一致，需从 https://github.com/falcosecurity/rules/releases 复制实际 asset 地址传入。
 
@@ -550,4 +520,4 @@ grep '^- rule:' falco/official-rules/*.yaml | sed 's/.*- rule: //' \
   | sort -u | while read r; do grep -q "\"$r\"" tsa/policy_config.yaml && echo "已配权重: $r"; done | wc -l
 ```
 
-> 注意：拉取到的规则版本应和实际安装的 falco 版本一致，分析结论才能套用到线上。生产部署用的仍是 falco 包自带的规则，`deploy-host-falco.sh` 只追加本项目的自定义规则与例外。
+> 必须在目标 Falco 引擎上校验规则兼容性，并评估新增规则的误报、性能及评分权重。锁定内容不代表所有规则启用，也不代表覆盖全部攻击。

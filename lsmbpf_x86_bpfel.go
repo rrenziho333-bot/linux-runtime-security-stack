@@ -37,6 +37,23 @@ type lsmbpfPolicyValue struct {
 	ExpiresAtNs uint64
 }
 
+// Names of all BPF objects in the ELF.
+//
+// Used for safe lookups in a Collection or CollectionSpec.
+const (
+	lsmbpfMapAllowedUids           = "allowed_uids"
+	lsmbpfMapEvents                = "events"
+	lsmbpfMapProtectedObjects      = "protected_objects"
+	lsmbpfMapSettings              = "settings"
+	lsmbpfMapStats                 = "stats"
+	lsmbpfProgHandleFileMprotect   = "handle_file_mprotect"
+	lsmbpfProgHandleFilePermission = "handle_file_permission"
+	lsmbpfProgHandleInodeRename    = "handle_inode_rename"
+	lsmbpfProgHandleInodeSetattr   = "handle_inode_setattr"
+	lsmbpfProgHandleInodeUnlink    = "handle_inode_unlink"
+	lsmbpfProgHandleMmapFile       = "handle_mmap_file"
+)
+
 // loadLsmbpf returns the embedded CollectionSpec for lsmbpf.
 func loadLsmbpf() (*ebpf.CollectionSpec, error) {
 	reader := bytes.NewReader(_LsmbpfBytes)
@@ -57,7 +74,7 @@ func loadLsmbpf() (*ebpf.CollectionSpec, error) {
 //	*lsmbpfMaps
 //
 // See ebpf.CollectionSpec.LoadAndAssign documentation for details.
-func loadLsmbpfObjects(obj interface{}, opts *ebpf.CollectionOptions) error {
+func loadLsmbpfObjects(obj any, opts *ebpf.CollectionOptions) error {
 	spec, err := loadLsmbpf()
 	if err != nil {
 		return err
@@ -79,10 +96,12 @@ type lsmbpfSpecs struct {
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type lsmbpfProgramSpecs struct {
+	HandleFileMprotect   *ebpf.ProgramSpec `ebpf:"handle_file_mprotect"`
 	HandleFilePermission *ebpf.ProgramSpec `ebpf:"handle_file_permission"`
 	HandleInodeRename    *ebpf.ProgramSpec `ebpf:"handle_inode_rename"`
 	HandleInodeSetattr   *ebpf.ProgramSpec `ebpf:"handle_inode_setattr"`
 	HandleInodeUnlink    *ebpf.ProgramSpec `ebpf:"handle_inode_unlink"`
+	HandleMmapFile       *ebpf.ProgramSpec `ebpf:"handle_mmap_file"`
 }
 
 // lsmbpfMapSpecs contains maps before they are loaded into the kernel.
@@ -149,18 +168,22 @@ type lsmbpfVariables struct {
 //
 // It can be passed to loadLsmbpfObjects or ebpf.CollectionSpec.LoadAndAssign.
 type lsmbpfPrograms struct {
+	HandleFileMprotect   *ebpf.Program `ebpf:"handle_file_mprotect"`
 	HandleFilePermission *ebpf.Program `ebpf:"handle_file_permission"`
 	HandleInodeRename    *ebpf.Program `ebpf:"handle_inode_rename"`
 	HandleInodeSetattr   *ebpf.Program `ebpf:"handle_inode_setattr"`
 	HandleInodeUnlink    *ebpf.Program `ebpf:"handle_inode_unlink"`
+	HandleMmapFile       *ebpf.Program `ebpf:"handle_mmap_file"`
 }
 
 func (p *lsmbpfPrograms) Close() error {
 	return _LsmbpfClose(
+		p.HandleFileMprotect,
 		p.HandleFilePermission,
 		p.HandleInodeRename,
 		p.HandleInodeSetattr,
 		p.HandleInodeUnlink,
+		p.HandleMmapFile,
 	)
 }
 

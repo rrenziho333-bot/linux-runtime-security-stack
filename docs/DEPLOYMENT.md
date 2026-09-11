@@ -1,5 +1,7 @@
 # 部署与演示
 
+> 升级前先读 [SECURITY_REVIEW.md](SECURITY_REVIEW.md)。当前仅回环监听，不自动开端口；基线与采集未就绪时评分 API 返回 503。
+
 > 首次部署/新手请先看 [INSTALL.md](INSTALL.md)。本文档假设 Falco 和 Go 等前置已装好；从空白机器开始的，先按 INSTALL 装好前置再回来。
 >
 > 适用于已装好前置的 Linux 主机（内核有没有 BPF LSM 都行：有就完整运行，没有就自动降级为纯检测，见 INSTALL 第 9 节）。命令以项目根目录为当前路径。
@@ -42,7 +44,7 @@ sudo ./deploy-security-stack.sh
 
 部署脚本没有硬编码用户名或绝对路径，移植步骤：
 
-1. 把仓库放在任意目录（如 `/opt/security-stack`），确保部署用户对其有读写权限；
+1. 使用仅含英文字符、数字、`/`、`_`、`-`、`.` 的目录（如 `/opt/security-stack`），确保部署用户有读写权限；
 2. 确认该部署用户存在、有家目录、能 `sudo`（脚本以 `SUDO_USER` 作为运行态账户和构建账户）；
 3. 装前置：Falco（modern eBPF）、Go 1.25、Lynis（可选）；内核 BPF LSM 可选（有则完整，无则自动降级，见 INSTALL）；
 4. `cd <仓库目录> && sudo ./deploy-security-stack.sh`。
@@ -70,7 +72,7 @@ journalctl -u tsa-fusion -n 10 --no-pager           # TSA 评分日志（两种�
 http://127.0.0.1:8766/
 ```
 
-看板展示流水线状态、BPF 策略、风险评分和 Falco/BPF 证据链，只读。服务绑 `0.0.0.0:8766`，可被别的主机访问（本机用 `http://127.0.0.1:8766/`，别的主机用 `http://<监测机IP>:8766/`，监测机 IP 用 `ip a` 或 `hostname -I` 查）；部署脚本会自动放行监测机防火墙 8766 端口。公开接口 `GET /systemManage/risk/score` 供外部系统程序化查询实时风险分（统一响应信封）。
+看板展示流水线状态、保护策略、评分与证据，只读且仅绑定 `127.0.0.1:8766`，不会自动开防火墙。远程通过第 9 节的 SSH 转发或鉴权 TLS 代理访问。评分接口仅在数据就绪时提供分值，否则返回 503。
 
 持续跟随日志（实时）：
 
@@ -159,13 +161,14 @@ tee 请求 write
 ./falco/rules.d/
 ```
 
-修改后执行部署脚本。脚本会加载官方规则、自定义规则和例外做完整校验，校验通过才重启 Falco：
+从 `91-custom-rules.yaml` 添加自己的规则；官方规则固定在仓库 `falco/official-rules/`，由 `rules.lock.json` 校验。先校验，再只更新 Falco：
 
 ```bash
-sudo ./deploy-security-stack.sh
+python3 falco/manage_rules.py check
+sudo ./falco/deploy-host-falco.sh
 ```
 
-Falco 只负责报警，不承担阻断。
+规则安装至 `/etc/falco/security-stack/rules/<规则包ID>/`，不是覆盖系统包文件；本机额外规则保留。完整位置说明及可复制示例见 [FALCO_RULES.md](FALCO_RULES.md)。Falco 只负责报警，不承担阻断。
 
 ## 6. 修改 BPF LSM 策略
 
@@ -225,17 +228,14 @@ sudo tail -n 20 /var/log/bpf-lsm/events.jsonl
 Falco 规则错误：
 
 ```bash
-sudo falco -V /etc/falco/falco_rules.yaml \
-  -V /etc/falco/falco-sandbox_rules.yaml \
-  -V /etc/falco/falco-incubating_rules.yaml \
-  -V /etc/falco/rules.d
+sudo python3 falco/manage_rules.py check
 sudo falco --dry-run
 journalctl -u falco-modern-bpf -n 30 --no-pager
 ```
 
 ## 9. 对外接口：查询实时风险分值
 
-看板服务（`tsa-dashboard`，绑 `0.0.0.0:8766`）对外暴露一个只读 HTTP 接口，遵循《零信任管理系统接口文档》地面系统 HTTP 接口规范的统一响应信封 `{code, status, message, data}`。外部系统（如零信任管理系统）可用它程序化查询监测主机的实时风险分。
+看板服务绑定 `127.0.0.1:8766`，提供只读 HTTP 接口与 `{code, status, message, data}` 响应信封。外部系统须经过 SSH 转发或有鉴权的 TLS 代理。
 
 ### 9.1 接口规格
 
@@ -246,8 +246,8 @@ journalctl -u falco-modern-bpf -n 30 --no-pager
 | 路径 | `/systemManage/risk/score` |
 | 端口 | 8766 |
 | 本机访问 | `http://127.0.0.1:8766/systemManage/risk/score` |
-| 他机访问 | `http://<监测机IP>:8766/systemManage/risk/score` |
-| 认证 | 暂无（内网/可信环境；对外暴露建议后续加 token） |
+| 他机访问 | SSH 转发后的本机端口，或已部署的鉴权 TLS 代理 |
+| 认证 | 回环接口信任本机用户；远程认证由 SSH 或代理提供 |
 
 ### 9.2 验证接口（本机）
 
@@ -275,32 +275,32 @@ curl -s http://127.0.0.1:8766/systemManage/risk/score | jq
 - `posture`：Lynis 静态基线分。
 - `runtime`：运行时分（来自 Falco/BPF 实时事件，随风险过期自动回升）。
 
-失败时返回 `code=50000, status=false`（如 TSA 状态库未就绪），属信封规范内的错误响应。
+状态库未就绪、TSA 心跳过期、采集服务停止、日志不可读或基线不可用时，返回 HTTP 503、`code=50000, status=false, data=null`。上面的满分响应只适用于全部数据就绪且没有有效风险的情况。
 
 ### 9.3 验证接口（别的主机访问）
 
-前提：监测机已部署、防火墙已放行 8766（部署脚本自动放行；云主机还需在云控制台安全组放行）。
+前提：监测机已部署，访问端具有 SSH 登录权限。无需向网络开放 8766。
 
 在另一台主机上执行：
 
 ```bash
-# 把 <监测机IP> 换成监测主机的实际 IP
-curl -s http://<监测机IP>:8766/systemManage/risk/score | jq
+# 在访问端保持 SSH 转发运行
+ssh -N -L 127.0.0.1:8766:127.0.0.1:8766 user@linux-host
+# 在访问端另一个终端查询
+curl -s http://127.0.0.1:8766/systemManage/risk/score | jq
 ```
 
 能拿到上面的统一信封分值，就说明他机可访问监测主机的实时分数。
 
-也可用浏览器打开 `http://<监测机IP>:8766/` 看网页看板。
+也可在访问端浏览器打开 `http://127.0.0.1:8766/`。
 
 ### 9.4 他机访问不通的排查
 
 ```bash
-# 监测机上确认服务在监听 0.0.0.0:8766
-ss -ltnp | grep 8766          # 应见 0.0.0.0:8766 或 *:8766
-# 监测机上确认防火墙已放行（CentOS）
-sudo firewall-cmd --list-ports | grep 8766
-# 监测机上确认防火墙已放行（Ubuntu）
-sudo ufw status | grep 8766
+# 监测机上应仅监听回环地址
+ss -ltnp | grep 8766
+# 监测机上检查数据就绪情况
+curl -s http://127.0.0.1:8766/api/status
 ```
 
-若都正常仍不通：监测机若是云主机，检查云平台安全组是否放行 8766 入站（系统防火墙之外的层）。
+本机正常而转发不通时，检查 SSH 连接及访问端端口占用；不应改为公开监听来绕过访问控制。

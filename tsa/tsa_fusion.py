@@ -26,6 +26,8 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Run the baseline scan, write a report, and exit",
     )
+    parser.add_argument("--bpf-lsm", choices=("configured", "enabled", "disabled"),
+                        default="configured", help="Override the BPF event source for this run")
     return parser.parse_args()
 
 
@@ -37,7 +39,8 @@ def main() -> int:
         datefmt="%Y-%m-%dT%H:%M:%S%z",
     )
 
-    agent = TSAFusionAgent(args.config)
+    override = None if args.bpf_lsm == "configured" else args.bpf_lsm == "enabled"
+    agent = TSAFusionAgent(args.config, bpf_lsm_enabled=override)
     signal.signal(signal.SIGINT, agent.request_stop)
     signal.signal(signal.SIGTERM, agent.request_stop)
 

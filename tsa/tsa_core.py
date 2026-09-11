@@ -11,10 +11,11 @@ import sqlite3
 import subprocess
 import threading
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
+from typing import Any, Dict, Iterable, Iterator, List, Mapping, Optional, Tuple
 
 import yaml
 
@@ -82,7 +83,26 @@ class StateStore:
         }
         if "risk_expires_at" not in columns:
             self.db.execute("ALTER TABLE events ADD COLUMN risk_expires_at REAL")
+        self.db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_events_active "
+            "ON events(risk_expires_at, rule_name) "
+            "WHERE status = 'scored' AND deducted_points > 0"
+        )
         self.db.commit()
+
+    @contextmanager
+    def transaction(self) -> Iterator[None]:
+        outermost = not self.db.in_transaction
+        if outermost:
+            self.db.execute("BEGIN IMMEDIATE")
+        try:
+            yield
+            if outermost:
+                self.db.commit()
+        except BaseException:
+            if outermost:
+                self.db.rollback()
+            raise
 
     def close(self) -> None:
         self.db.close()
@@ -93,14 +113,14 @@ class StateStore:
 
     def set(self, key: str, value: Any) -> None:
         encoded = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
-        self.db.execute(
-            """
-            INSERT INTO state(key, value) VALUES(?, ?)
-            ON CONFLICT(key) DO UPDATE SET value = excluded.value
-            """,
-            (key, encoded),
-        )
-        self.db.commit()
+        with self.transaction():
+            self.db.execute(
+                """
+                INSERT INTO state(key, value) VALUES(?, ?)
+                ON CONFLICT(key) DO UPDATE SET value = excluded.value
+                """,
+                (key, encoded),
+            )
 
     def admit_points(
         self,
@@ -115,7 +135,7 @@ class StateStore:
         """Atomically apply deduplication and per-rule rate limiting."""
 
         requested_points = max(0, requested_points)
-        with self.db:
+        with self.transaction():
             row = self.db.execute(
                 "SELECT * FROM dedup_windows WHERE event_key = ?", (event_key,)
             ).fetchone()
@@ -187,7 +207,7 @@ class StateStore:
         payload: Mapping[str, Any],
         risk_expires_at: Optional[float] = None,
     ) -> None:
-        with self.db:
+        with self.transaction():
             self.db.execute(
                 """
                 INSERT INTO events(
@@ -268,11 +288,16 @@ class StateStore:
             now - retention_days * 86400, timezone.utc
         ).isoformat()
         dedup_cutoff = now - 86400
-        with self.db:
-            self.db.execute("DELETE FROM events WHERE received_time < ?", (cutoff_iso,))
+        with self.transaction():
+            self.db.execute(
+                "DELETE FROM events WHERE received_time < ? "
+                "AND (risk_expires_at IS NULL OR risk_expires_at <= ?)",
+                (cutoff_iso, now),
+            )
             self.db.execute(
                 "DELETE FROM dedup_windows WHERE last_seen < ?", (dedup_cutoff,)
             )
+            self.db.execute("DELETE FROM rate_limits WHERE window_started < ?", (dedup_cutoff,))
 
 
 @dataclass(frozen=True)
@@ -293,13 +318,14 @@ class RiskScorer:
         self.runtime_score = float(
             store.get("runtime_score", runtime_cfg.get("init_score", 100))
         )
-        self.posture_score = float(store.get("posture_score", 100))
+        posture = store.get("posture_score", None)
+        self.posture_score = float(posture) if posture is not None else None
         self.last_attack_time = float(store.get("last_attack_time", 0.0))
         self.last_recovery_time = float(store.get("last_recovery_time", 0.0))
         self.refresh_runtime_score(time.time())
 
-    def set_posture_score(self, score: float) -> None:
-        self.posture_score = _clamp_score(score)
+    def set_posture_score(self, score: Optional[float]) -> None:
+        self.posture_score = _clamp_score(score) if score is not None else None
         self.store.set("posture_score", self.posture_score)
 
     def _risk_ttl(self, priority: str, defaults: Mapping[str, Any]) -> int:
@@ -432,6 +458,15 @@ class RiskScorer:
         received_at: Optional[float] = None,
         suppress_scoring: bool = False,
     ) -> Optional[Dict[str, Any]]:
+        with self.store.transaction():
+            return self._process_falco_event(event, received_at, suppress_scoring)
+
+    def _process_falco_event(
+        self,
+        event: Mapping[str, Any],
+        received_at: Optional[float] = None,
+        suppress_scoring: bool = False,
+    ) -> Optional[Dict[str, Any]]:
         if not isinstance(event, Mapping) or "rule" not in event:
             return None
 
@@ -440,7 +475,7 @@ class RiskScorer:
         rule = str(event.get("rule", "Unknown"))
         priority = str(event.get("priority", "INFO")).upper()
         tags = event.get("tags", []) or []
-        tags = tags if isinstance(tags, list) else []
+        tags = [tag for tag in tags if isinstance(tag, str)] if isinstance(tags, list) else []
         output_fields = event.get("output_fields", {}) or {}
         output_fields = output_fields if isinstance(output_fields, Mapping) else {}
         event_key = self._event_key(rule, output_fields)
@@ -480,7 +515,6 @@ class RiskScorer:
             "file": output_fields.get("fd.name", ""),
             "command": output_fields.get("proc.cmdline", ""),
             "container_id": output_fields.get("container.id", "host"),
-            "runtime_score": self.runtime_score,
         }
         self.store.record_event(
             received_time=received_time,
@@ -505,8 +539,23 @@ class RiskScorer:
         received_at: Optional[float] = None,
         suppress_scoring: bool = False,
     ) -> Optional[Dict[str, Any]]:
+        with self.store.transaction():
+            return self._process_bpf_lsm_event(event, received_at, suppress_scoring)
+
+    def _process_bpf_lsm_event(
+        self,
+        event: Mapping[str, Any],
+        received_at: Optional[float] = None,
+        suppress_scoring: bool = False,
+    ) -> Optional[Dict[str, Any]]:
         if not isinstance(event, Mapping) or event.get("source") != "bpf_lsm":
             return None
+
+        for field in ("policy_id", "pid", "uid", "device", "inode"):
+            value = event.get(field, 0)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                LOG.warning("Ignoring BPF event with invalid %s", field)
+                return None
 
         now = time.time() if received_at is None else received_at
         received_time = datetime.fromtimestamp(now, timezone.utc).isoformat()
@@ -583,7 +632,6 @@ class RiskScorer:
             "command": event.get("command", ""),
             "device": event.get("device", 0),
             "inode": event.get("inode", 0),
-            "runtime_score": self.runtime_score,
         }
         self.store.record_event(
             received_time=received_time,
@@ -616,7 +664,7 @@ class RiskScorer:
         self.refresh_runtime_score(current)
         return max(0, int(self.runtime_score - previous))
 
-    def final_score(self) -> float:
+    def final_score(self) -> Optional[float]:
         self.refresh_runtime_score(time.time())
         scoring = self.config.get("scoring", {}) or {}
         weights = scoring.get("weights", {}) or {}
@@ -625,10 +673,12 @@ class RiskScorer:
         total = posture_weight + runtime_weight
         if total == 0:
             posture_weight, runtime_weight, total = 0.4, 0.6, 1.0
+        if posture_weight and self.posture_score is None:
+            return None
         return round(
             _clamp_score(
                 (
-                    self.posture_score * posture_weight
+                    (self.posture_score or 0) * posture_weight
                     + self.runtime_score * runtime_weight
                 )
                 / total
@@ -639,6 +689,8 @@ class RiskScorer:
 
 class RotatingLineReader:
     """Tail a file while preserving offsets and following rotation/truncation."""
+
+    MAX_LINE_LENGTH = 1024 * 1024
 
     def __init__(
         self,
@@ -654,6 +706,7 @@ class RotatingLineReader:
         self.state_prefix = state_prefix
         self.file: Optional[Any] = None
         self.identity = ""
+        self.discarding = False
 
     def close(self) -> None:
         if self.file is not None:
@@ -663,7 +716,7 @@ class RotatingLineReader:
     def _saved_identity(self) -> str:
         return str(self.store.get(f"{self.state_prefix}.identity", ""))
 
-    def _open(self) -> bool:
+    def _open(self, reset_offset: bool = False) -> bool:
         try:
             stat = self.path.stat()
         except FileNotFoundError:
@@ -676,17 +729,24 @@ class RotatingLineReader:
 
         self.close()
         self.file = self.path.open("r", encoding="utf-8", errors="replace")
-        if identity == saved_identity:
-            self.file.seek(min(saved_offset, stat.st_size))
+        if identity == saved_identity and not reset_offset:
+            self.file.seek(saved_offset if saved_offset <= stat.st_size else 0)
         elif first_seen and self.start_at_end:
             self.file.seek(0, os.SEEK_END)
         else:
             self.file.seek(0)
 
         self.identity = identity
-        self.store.set(f"{self.state_prefix}.identity", identity)
-        self.store.set(f"{self.state_prefix}.offset", self.file.tell())
+        self.discarding = False
+        self.acknowledge()
         return True
+
+    def acknowledge(self) -> None:
+        """Commit the cursor in the same transaction as the consumed event."""
+        assert self.file is not None
+        with self.store.transaction():
+            self.store.set(f"{self.state_prefix}.identity", self.identity)
+            self.store.set(f"{self.state_prefix}.offset", self.file.tell())
 
     def _needs_reopen(self) -> bool:
         if self.file is None:
@@ -704,30 +764,44 @@ class RotatingLineReader:
         assert self.file is not None
 
         position = self.file.tell()
-        line = self.file.readline()
+        line = self.file.readline(self.MAX_LINE_LENGTH + 1)
         if line:
+            if self.discarding or len(line) > self.MAX_LINE_LENGTH:
+                self.discarding = not line.endswith("\n")
+                if not self.discarding:
+                    LOG.warning("Discarded oversized event from %s", self.path)
+                    return ""
+                return None
             if not line.endswith("\n"):
                 self.file.seek(position)
+                if self._needs_reopen():
+                    self._open(reset_offset=True)
                 return None
-            self.store.set(f"{self.state_prefix}.offset", self.file.tell())
             return line
 
         if self._needs_reopen():
-            self._open()
+            self._open(reset_offset=True)
         return None
 
 
 def parse_lynis_report(
     report_path: Path,
+    *,
+    require_complete: bool = False,
 ) -> Tuple[List[Tuple[str, str]], List[Tuple[str, str]]]:
     warnings: List[Tuple[str, str]] = []
     suggestions: List[Tuple[str, str]] = []
     if not report_path.exists():
+        if require_complete:
+            raise FileNotFoundError(report_path)
         return warnings, suggestions
 
+    header = finished = False
     with report_path.open("r", encoding="utf-8", errors="replace") as report:
         for raw_line in report:
             line = raw_line.strip()
+            header = header or line.startswith("report_version_major=")
+            finished = finished or line == "finish=true"
             if line.startswith("warning[]="):
                 kind, target = "warning", warnings
             elif line.startswith("suggestion[]="):
@@ -740,17 +814,21 @@ def parse_lynis_report(
             message = parts[1].strip() if len(parts) > 1 else ""
             if control:
                 target.append((control, message))
+    if require_complete and not (header and finished):
+        raise ValueError("Lynis report is incomplete or invalid")
     return warnings, suggestions
 
 
 class TSAFusionAgent:
-    def __init__(self, config_path: str):
+    def __init__(self, config_path: str, *, bpf_lsm_enabled: Optional[bool] = None):
         self.config_path = Path(config_path).expanduser().resolve()
         self.config_dir = self.config_path.parent
         with self.config_path.open("r", encoding="utf-8") as config_file:
             self.config = yaml.safe_load(config_file) or {}
         if not isinstance(self.config, Mapping):
             raise ValueError("TSA configuration root must be a mapping")
+        if bpf_lsm_enabled is not None:
+            self.config.setdefault("bpf_lsm", {})["enabled"] = bpf_lsm_enabled
 
         storage = self.config.get("storage", {}) or {}
         state_db = _resolve_path(
@@ -786,7 +864,7 @@ class TSAFusionAgent:
                     state_prefix="falco_log",
                 ),
             )
-        ]
+        ] if runtime_cfg.get("enabled", True) else []
         bpf_cfg = self.config.get("bpf_lsm", {}) or {}
         self.bpf_lsm_log_path: Optional[Path] = None
         if bpf_cfg.get("enabled", False):
@@ -794,6 +872,7 @@ class TSAFusionAgent:
                 self.config_dir,
                 str(bpf_cfg.get("log_path", "/var/log/bpf-lsm/events.jsonl")),
             )
+
             self.readers.append(
                 (
                     "bpf_lsm",
@@ -806,6 +885,11 @@ class TSAFusionAgent:
                 )
             )
 
+        self.store.set("enabled_sources", {
+            "runtime_rules": runtime_cfg.get("enabled", True),
+            "bpf_lsm": bpf_cfg.get("enabled", False),
+        })
+
     def close(self) -> None:
         for _, reader in self.readers:
             reader.close()
@@ -814,29 +898,49 @@ class TSAFusionAgent:
     def request_stop(self, _signum: int, _frame: Any) -> None:
         self.stop_event.set()
 
-    def run_posture_scan(self) -> float:
+    def run_posture_scan(self) -> Optional[float]:
         baseline = self.config.get("baseline_lynis", {}) or {}
         if not baseline.get("enabled", False):
             self.scorer.set_posture_score(100)
+            self.store.set("baseline_status", "disabled")
             return 100
+
+        try:
+            return self._run_posture_scan(baseline)
+        except (OSError, ValueError, subprocess.SubprocessError) as error:
+            LOG.warning("Baseline unavailable: %s", error)
+            self.scorer.set_posture_score(None)
+            self.store.set("baseline_status", "unavailable")
+            self.recent_lynis_hits = []
+            self.store.set("recent_lynis_hits", [])
+            return None
+
+    def _run_posture_scan(self, baseline: Mapping[str, Any]) -> float:
+        report_path = _resolve_path(
+            self.config_dir,
+            str(baseline.get("report_path", "/var/log/lynis-report.dat")),
+        )
 
         if baseline.get("run_lynis", False):
             command = str(baseline.get("lynis_cmd", "lynis audit system --quick --quiet"))
+            arguments = shlex.split(command)
+            if "--report-file" not in arguments:
+                arguments.extend(["--report-file", str(report_path)])
             completed = subprocess.run(
-                shlex.split(command),
+                arguments,
                 capture_output=True,
                 text=True,
                 check=False,
                 timeout=int(baseline.get("timeout_seconds", 1800)),
             )
             if completed.returncode:
-                LOG.warning("Lynis exited with rc=%s: %s", completed.returncode, completed.stderr[:300])
+                raise ValueError(f"Lynis exited with rc={completed.returncode}")
 
-        report_path = _resolve_path(
-            self.config_dir,
-            str(baseline.get("report_path", "/var/log/lynis-report.dat")),
-        )
-        warnings, suggestions = parse_lynis_report(report_path)
+        report_stat = report_path.stat()
+        max_age = max(1, int(baseline.get("max_report_age_seconds", 86400)))
+        if report_stat.st_size == 0 or time.time() - report_stat.st_mtime > max_age:
+            raise ValueError("Lynis report is empty or stale")
+        warnings, suggestions = parse_lynis_report(report_path, require_complete=True)
         controls = set(baseline.get("include_controls", []) or [])
         deductions = baseline.get("deduct_by_control", {}) or {}
         defaults = baseline.get("default_deduct", {}) or {}
@@ -866,6 +970,8 @@ class TSAFusionAgent:
         if mode == "warnings_and_selected_suggestions":
             total += apply("suggestion", suggestions)
         self.scorer.set_posture_score(100 - total)
+        self.store.set("baseline_status", "ok")
+        self.store.set("baseline_report_mtime", report_stat.st_mtime)
         self.recent_lynis_hits = hits[-50:]
         self.store.set("recent_lynis_hits", self.recent_lynis_hits)
         LOG.info(
@@ -879,7 +985,7 @@ class TSAFusionAgent:
     def process_line(self, line: str) -> Optional[Dict[str, Any]]:
         try:
             event = json.loads(line)
-        except json.JSONDecodeError:
+        except (ValueError, RecursionError):
             LOG.warning("Ignoring malformed Falco JSON line")
             return None
         result = self.scorer.process_falco_event(
@@ -899,7 +1005,7 @@ class TSAFusionAgent:
     def process_bpf_lsm_line(self, line: str) -> Optional[Dict[str, Any]]:
         try:
             event = json.loads(line)
-        except json.JSONDecodeError:
+        except (ValueError, RecursionError):
             LOG.warning("Ignoring malformed BPF LSM JSON line")
             return None
         result = self.scorer.process_bpf_lsm_event(
@@ -921,6 +1027,7 @@ class TSAFusionAgent:
         report = {
             "generated_time": _utc_now(),
             "status": status,
+            "baseline_status": self.store.get("baseline_status", "unavailable"),
             "sources": {
                 "falco_log_path": str(self.falco_log_path),
                 "bpf_lsm_log_path": (
@@ -947,6 +1054,7 @@ class TSAFusionAgent:
         os.replace(temporary, self.report_path)
 
     def run_daemon(self) -> None:
+        self.store.set("fusion_status", "starting")
         self.run_posture_scan()
         runtime_cfg = self.config.get("runtime_rules", {}) or {}
         poll_interval = max(0.1, float(runtime_cfg.get("poll_interval", 1)))
@@ -954,22 +1062,46 @@ class TSAFusionAgent:
         report_interval = max(10, int(reporting.get("interval_seconds", 300)))
         retention_days = max(1, int(reporting.get("retention_days", 30)))
         next_report = time.monotonic() + report_interval
+        baseline = self.config.get("baseline_lynis", {}) or {}
+        baseline_interval = max(10, int(baseline.get("interval_seconds", 300)))
+        next_baseline = time.monotonic() + baseline_interval
+        next_heartbeat = 0.0
+        self.generate_report("running")
 
         LOG.info(
             "Watching security event sources: %s",
             ", ".join(f"{source}={reader.path}" for source, reader in self.readers),
         )
         while not self.stop_event.is_set():
+            monotonic = time.monotonic()
+            if monotonic >= next_heartbeat:
+                with self.store.transaction():
+                    self.store.set("fusion_heartbeat", time.time())
+                    self.store.set("fusion_status", "running")
+                    self.store.set("source_status", {
+                        source: reader.file is not None and reader.path.is_file()
+                        for source, reader in self.readers
+                    })
+                next_heartbeat = monotonic + 5
+            if monotonic >= next_baseline:
+                self.run_posture_scan()
+                next_baseline = time.monotonic() + baseline_interval
+            if monotonic >= next_report:
+                self.generate_report("running")
+                self.store.prune(time.time(), retention_days)
+                next_report = time.monotonic() + report_interval
             processed = False
             for source, reader in self.readers:
                 line = reader.readline()
                 if line is None:
                     continue
                 processed = True
-                if source == "falco":
-                    self.process_line(line)
-                else:
-                    self.process_bpf_lsm_line(line)
+                with self.store.transaction():
+                    if source == "falco":
+                        self.process_line(line)
+                    else:
+                        self.process_bpf_lsm_line(line)
+                    reader.acknowledge()
             if processed:
                 continue
 
@@ -980,10 +1112,7 @@ class TSAFusionAgent:
                     recovered,
                     self.scorer.runtime_score,
                 )
-            if time.monotonic() >= next_report:
-                self.generate_report("running")
-                self.store.prune(time.time(), retention_days)
-                next_report = time.monotonic() + report_interval
             self.stop_event.wait(poll_interval)
 
+        self.store.set("fusion_status", "stopped")
         self.generate_report("stopped")

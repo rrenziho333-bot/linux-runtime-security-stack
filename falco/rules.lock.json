@@ -1,0 +1,18 @@
+{
+  "version": 1,
+  "normalization": "UTF-8 with LF newlines",
+  "files": {
+    "falco_rules.yaml": {
+      "sha256": "4693388e38b6c34404c35330660f93ef9c74aa0fcb70879bbeb36d5c83601bdc",
+      "rules": 25
+    },
+    "falco-sandbox_rules.yaml": {
+      "sha256": "5a53a9c5c5300bcaf4b67d1c48c98c4fa715ce3f3174080eec310fa29a714b51",
+      "rules": 37
+    },
+    "falco-incubating_rules.yaml": {
+      "sha256": "03256aef21f3cff1fa0ee5e8e35330a931a93dd13a50816a93d51d87b4bc8bda",
+      "rules": 31
+    }
+  }
+}
