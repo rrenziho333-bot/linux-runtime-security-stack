@@ -49,3 +49,5 @@
 - 之前在另一台 Ubuntu 22.04.5 / `6.8.0-60-generic` / Falco 0.42.1 完成过 13 项故障检查、BPF 重新生成和竞态测试；未在本轮新机重做全部故障注入，不能混用测试范围。完整历史记录保留在 [Git 历史](https://github.com/rrenziho333-bot/linux-runtime-security-stack/blob/21badc19d97c5b7fbc9cc2136574b7fc5d140a9f/docs/VM_VALIDATION.md)。
 
 **结论：上述干净 Ubuntu 路线的安装、检测、实际阻断、评分和冷启动恢复已验证通过；项目是可复现的安全实验系统，不是已完成生产安全准入的产品。**
+
+精简回归（2026-09-11，`5a73311`）：在同一虚拟机对清理后的仓库重新部署，54 项 Python 测试、Go 构建、真实 Falco/BPF audit、自定义读取规则、enforce 返回 EPERM、双源证据、SQLite 完整性和特权 BPF 集成测试全部通过，最后恢复 audit。规则内容、校验锁和 BPF 对象未改变；本轮未再次重装操作系统或重复冷启动测试。
