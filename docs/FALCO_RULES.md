@@ -108,12 +108,13 @@ sudo falco -L -o json_output=false
 ```bash
 python3 falco/manage_rules.py check
 sudo ./falco/deploy-host-falco.sh
+sleep 5
 touch /tmp/lrss-learning.txt
 cat /tmp/lrss-learning.txt
 sudo tail -n 20 /var/log/falco/falco.json
 ```
 
-应检查事件对象、进程与规则名。默认 `rule_matching: first`，若更早的规则已经匹配该事件，实际告警可能使用先匹配的名称。不要为了固定告警名盲目开启 `all` 或禁用官方规则。
+应检查事件对象、进程与规则名。systemd 的 active 只说明进程已启动，采集引擎初始化可能更慢；若重启后的首次读取没有事件，等几秒再执行只读的 `cat` 并检查日志。默认 `rule_matching: first`，若更早的规则已经匹配该事件，实际告警可能使用先匹配的名称。不要为了固定告警名盲目开启 `all` 或禁用官方规则。
 
 需要指定扣分时，在 `tsa/policy_config.yaml` 的 `runtime_rules.specific_rules` 增加 `"Project learning file opened": 5`，重启 `tsa-fusion`。不配置专属分值时按现有 tags/priority 兜底；去重和限速可能使新告警不立即扣分。修改评分配置不会创建 Falco 检测规则，更不会自动添加 BPF 阻断策略。
 
