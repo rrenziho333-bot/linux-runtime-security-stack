@@ -7,7 +7,7 @@ if [[ ${EUID} -ne 0 ]]; then
 fi
 
 ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-GO_BIN="/usr/local/go/bin/go"
+GO_BIN="${GO_BIN:-/usr/local/go/bin/go}"
 if [[ -z ${SUDO_USER:-} || ${SUDO_USER} == root ]]; then
   echo "Could not determine the runtime user: SUDO_USER is unset." >&2
   echo "Run this script with: sudo ${0}" >&2
@@ -46,7 +46,7 @@ fi
 run_as_builder() {
   runuser -u "${BUILD_USER}" -- env \
     HOME="${BUILD_HOME}" \
-    PATH="/usr/local/go/bin:/usr/local/bin:/usr/bin:/bin" \
+    PATH="$(dirname -- "${GO_BIN}"):/usr/local/bin:/usr/bin:/bin" \
     GOTOOLCHAIN="auto" \
     GOPROXY="off" \
     "$@"
@@ -102,8 +102,8 @@ fi
 
 if [[ ${BPF_LSM_AVAILABLE} -eq 1 ]]; then
   # Full mode: Go toolchain is required to build the bpf-lsm-controller binary.
-  if [[ ! -x ${GO_BIN} ]]; then
-    echo "Full mode needs the Go toolchain at ${GO_BIN} (install Go 1.25, see docs/INSTALL.md §3)." >&2
+  if [[ ${GO_BIN} != /* || ! -x ${GO_BIN} ]]; then
+    echo "Full mode needs Go at ${GO_BIN}; install a version satisfying go.mod or set GO_BIN to its absolute path." >&2
     exit 1
   fi
   run_as_builder "${GO_BIN}" test ./...

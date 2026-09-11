@@ -27,6 +27,15 @@ cd linux-runtime-security-stack
 /usr/local/go/bin/go mod download
 ```
 
+如果需要保留系统原有 Go，可使用独立安装的新工具链。先用它运行 `go mod download`，再通过绝对路径部署，例如：
+
+```bash
+/opt/go/bin/go mod download
+sudo GO_BIN=/opt/go/bin/go ./deploy-security-stack.sh
+```
+
+`GO_BIN` 默认仍为 `/usr/local/go/bin/go`；指定版本必须满足 `go.mod`。
+
 安装 Lynis 后，在项目根目录准备基线：
 
 ```bash
@@ -71,6 +80,8 @@ curl -s http://127.0.0.1:8766/systemManage/risk/score | jq
 ```
 
 检测模式没有 BPF 日志；完整模式应看到演示策略的 audit 事件。Falco 和 BPF 的事件分别计分；重复事件、已有风险和实际启用规则会影响数值，不保证每次固定扣 7 分。浏览器打开 `http://127.0.0.1:8766/` 查看证据。
+
+Falco 默认采用首条匹配规则：写入演示文件可能命中官方 `Write below etc`，而不是后加载的 `Monitor specific file access`。验收应核对文件路径、进程和事件时间，不应只检查一个固定规则名；读取该演示文件可单独验证自定义读取规则。`rule_matching: all` 会增加同一操作的告警数量、计分和性能开销，本项目不会自动开启。参见 [Falco 规则匹配说明](https://falco.org/docs/concepts/rules/style-guide/)。
 
 ## 5. 另一台电脑访问
 

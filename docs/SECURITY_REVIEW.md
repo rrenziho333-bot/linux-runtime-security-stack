@@ -1,6 +1,6 @@
 # 安全审查与升级说明
 
-审查基线：`fc9ef14aa2e5122e241fc42faefddc1a46c702b6`。修复日期：2026-09-10。
+审查基线：`fc9ef14aa2e5122e241fc42faefddc1a46c702b6`。修复日期：2026-09-10。Ubuntu 虚拟机验证更新：2026-09-11。
 
 这是一轮代码与回归测试驱动的安全加固，不是“已证明不存在任何漏洞”的认证。
 
@@ -84,9 +84,11 @@ python3 -m unittest discover -s tests -v
 
 仓库提供 `tests/Dockerfile` 用于可重复的 Linux 构建环境，GitHub Actions 运行同样的常规检查。Windows 跳过两项依赖 POSIX 打开文件重命名语义的测试；Linux 不跳过这两项。
 
-本次本机验证：Linux 容器中 38 项 Python 回归测试全部通过；BPF 对象重新生成，Go 竞态测试、go vet、控制器构建以及 shell 语法检查通过。用 govulncheck v1.8.0 对 Go 1.25.14 构建的控制器二进制扫描，未报告已知漏洞。Go 内核集成测试按设计跳过，目标内核上的六个 hooks 挂载和真实阻断尚未验证。扫描结果仅代表所用版本和当时的漏洞数据库。
+2026-09-10 容器验证：38 项 Python 回归测试全部通过；BPF 对象重新生成，Go 竞态测试、go vet、控制器构建以及 shell 语法检查通过。用 govulncheck v1.8.0 对 Go 1.25.14 构建的控制器二进制扫描，未报告已知漏洞。当轮内核集成测试按设计跳过。
 
-实际 BPF 挂载与阻断必须在可丢弃、启用了 BPF LSM 的 Linux 虚拟机验证。新增测试只保护它创建的临时文件，覆盖普通写入、共享 mmap（含 MAP_SHARED_VALIDATE）、mprotect、截断、删除、重命名以及私有映射放行：
+2026-09-11 在 Ubuntu 22.04.5 / 6.8.0-60-generic 虚拟机补齐了实际验证：六个 hooks 挂载成功，仓库自带和 Ubuntu 重新生成的 BPF 对象均通过内核集成测试；38 项 Python 回归、Go 竞态测试、vet、构建和 13 项端到端/故障检查全部通过。Go 1.26.8 控制器的 govulncheck 扫描未报告已知漏洞。详见 [VM_VALIDATION.md](VM_VALIDATION.md)。扫描结果只代表指定二进制和扫描时的漏洞数据库，不覆盖主机全部软件包。
+
+实际 BPF 挂载与阻断必须在可丢弃、启用了 BPF LSM 的 Linux 虚拟机验证。新增测试只保护它创建的临时文件，覆盖普通写入、共享 mmap（含 MAP_SHARED_VALIDATE）、mprotect、截断、删除、重命名及覆盖目标、私有映射隔离，以及 audit、UID 白名单和无关文件放行：
 
 ```bash
 sudo env BPF_LSM_INTEGRATION=1 /usr/local/go/bin/go test -run TestBPFEnforceIntegration -v

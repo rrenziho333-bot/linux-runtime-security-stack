@@ -7,9 +7,10 @@
 - 从空白机器开始装前置：[docs/INSTALL.md](docs/INSTALL.md)
 - 最快跑通（5 步，从 clone 到别人 curl 拿分）：[docs/QUICKSTART.md](docs/QUICKSTART.md)
 - 已装好前置、只需部署和实时检测：[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)
+- Ubuntu 真机内核、故障恢复和端到端验证：[docs/VM_VALIDATION.md](docs/VM_VALIDATION.md)
 - 风险分怎么算：[docs/INSTALL.md](docs/INSTALL.md) §6.6
 
-> **上游原版本记录的验证环境**：Ubuntu 22.04（kernel 6.8）+ Falco 0.44.x + Go 1.25。安全加固后的构建、测试和目标内核验证边界见 [审查记录](docs/SECURITY_REVIEW.md)。
+> **2026-09-11 安全加固版实测**：Ubuntu 22.04.5 LTS、kernel 6.8.0-60-generic、Falco 0.42.1、Go 1.26.8。内核阻断/放行及 13 项端到端检查通过，范围与未解决风险见 [验证报告](docs/VM_VALIDATION.md)。上游原版本另记录了 Falco 0.44.x 环境，不代表本轮已覆盖该版本。
 
 ## 30 秒速览
 
@@ -74,7 +75,7 @@ echo test | sudo tee -a /etc/tsa-protected-demo >/dev/null
 
 ## 4. 当前实现
 
-- Falco（实测 0.44.x，modern eBPF 主机版驱动；部署脚本兼容会改 `rules_files`/输出配置的多个 Falco 版本，见 [docs/INSTALL.md](docs/INSTALL.md) §7）；
+- Falco（本轮实测 0.42.1，modern eBPF 主机版驱动；部署脚本兼容会改 `rules_files`/输出配置的多个 Falco 版本，见 [docs/INSTALL.md](docs/INSTALL.md) §7）；
 - 检测规则 = Falco 官方规则集 + 1 条自定义文件监控规则（`falco/rules.d/`）；官方规则快照已入库可直接读（`falco/official-rules/`）；TSA 为其中 86 条官方规则配了扣分权重；
 - BPF 策略用 YAML 配置，默认 `audit` 模式；
 - TSA 用 SQLite 持久化，支持去重、限速、风险过期、重启恢复；
