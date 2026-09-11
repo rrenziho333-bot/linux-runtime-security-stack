@@ -85,7 +85,16 @@ echo test | sudo tee -a /etc/tsa-protected-demo >/dev/null
 
 ## 5. 快速使用
 
-跑下面的部署脚本前，先 clone 本仓库，装好 Falco（modern eBPF）和 Go 1.25。从空白机器开始的话，先看 [docs/INSTALL.md](docs/INSTALL.md) 从零装前置，否则部署会失败。
+默认分支 `main` 已包含安全加固、规则部署和四组件集成功能，直接克隆即可取得完整代码及规则，无需切换开发分支：
+
+```bash
+git clone https://github.com/rrenziho333-bot/linux-runtime-security-stack.git
+cd linux-runtime-security-stack
+```
+
+官方规则在 `falco/official-rules/`，自定义规则在 `falco/rules.d/91-custom-rules.yaml`。克隆只下载文件；规则需要部署后才会加载，默认禁用的规则不会被强制启用。完整 BPF 功能还取决于主机内核能力，按 [快速指南](docs/QUICKSTART.md) 准备依赖与基线后部署。
+
+从空白机器开始时，先看 [docs/INSTALL.md](docs/INSTALL.md) 安装前置，再按快速指南准备基线，否则部署或健康检查会失败。
 
 ```bash
 sudo ./deploy-security-stack.sh

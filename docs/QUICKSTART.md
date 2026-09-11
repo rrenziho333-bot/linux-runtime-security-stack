@@ -19,11 +19,11 @@ Falco modern eBPF 需要 BTF。LSM 列表包含 `bpf` 才部署内核保护组�
 ## 2. 获取代码与准备基线
 
 ```bash
-git clone --branch codex/security-hardening https://github.com/rrenziho333-bot/linux-runtime-security-stack.git
+git clone https://github.com/rrenziho333-bot/linux-runtime-security-stack.git
 cd linux-runtime-security-stack
 ```
 
-上述命令明确选择包含本轮修复和规则部署功能的分支；合并到 main 后可使用默认 clone。只下载代码不会自动安装依赖或启动服务。
+默认分支 `main` 包含安全加固、完整仓库规则集和规则部署功能，无需切换开发分支。只下载代码不会自动安装依赖或启动服务。
 
 完整模式先以随后执行 sudo 的同一普通用户下载 Go 模块：
 

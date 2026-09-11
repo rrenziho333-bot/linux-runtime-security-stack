@@ -31,10 +31,10 @@ SHA256 固定内容，不证明原快照的上游发布身份；历史文件没�
 `git clone` 只下载代码，不会安装内核能力或启动软件。本项目支持 systemd Linux；已验证 Ubuntu 22.04.5、内核 6.8、Falco 0.42.1。不是所有 Linux 发行版都能无前置直接运行。
 
 1. 按 [INSTALL.md](INSTALL.md) 安装 Falco、Python 3、PyYAML；完整阻断模式准备符合 `go.mod` 的 Go 和启用了 BPF LSM 的内核。
-2. clone 包含本功能的分支/提交。若功能还在 PR 分支而未合并，普通 clone 默认分支不会自动取得它：
+2. 直接 clone 默认分支 `main`，即可取得完整仓库规则集和部署功能，无需切换开发分支：
 
 ```bash
-git clone --branch codex/security-hardening https://github.com/rrenziho333-bot/linux-runtime-security-stack.git
+git clone https://github.com/rrenziho333-bot/linux-runtime-security-stack.git
 cd linux-runtime-security-stack
 python3 falco/manage_rules.py check
 ```
