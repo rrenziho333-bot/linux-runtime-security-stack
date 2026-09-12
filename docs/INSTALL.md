@@ -8,7 +8,14 @@
 
 ## 1. 准备系统与内核
 
-使用 Ubuntu 普通用户执行，需提权时用 sudo。前两条命令备份并切换到阿里云 HTTPS 源，保留签名验证；已有可用源可跳过。
+使用 Ubuntu 普通用户执行，需提权时用 sudo。**新装系统也可以先执行 1.6～1.9，再按结果选择安装步骤；内核检查通过不代表软件依赖已经齐全。**
+
+- 1.7 输出 `BTF OK`、1.8 输出 `CONFIG_BPF_LSM=y`：无需为本项目重装内核；需要补依赖时执行 1.3、1.4A，跳过 1.4B、1.5。
+- 上述两项通过且 1.9 含 `bpf`：还可跳过 1.10～1.13，补齐依赖后执行 1.14；若不含 `bpf`，仍需执行 1.10～1.13。
+- 1.7 或 1.8 未通过：执行 1.3、1.4B、1.5，重启后重新检查 1.6～1.9；仍失败时先排查，不继续部署。
+- **只有内核满足要求、且 1.4A 列出的依赖也已安装齐全，才能全部跳过 1.1～1.5。** 不确定依赖是否齐全时执行 1.3、1.4A，由 APT 检查并补齐。
+
+1.1、1.2 仅用于备份并切换到阿里云 HTTPS 源，保留签名验证；原软件源可用就跳过，与内核检查结果无关。
 
 **命令 1.1（可选）：备份软件源。**
 ```bash
@@ -25,17 +32,22 @@ sudo sed -i -E 's@https?://([a-z.]*archive|security)\.ubuntu\.com/ubuntu/?@https
 sudo apt-get -o APT::Update::Error-Mode=any update
 ```
 
-**命令 1.4：安装依赖与 HWE 内核。**
+**命令 1.4A（与 1.4B 二选一）：内核检查通过时，仅安装软件依赖。**
+```bash
+sudo apt-get install -y ca-certificates curl gnupg git python3-yaml jq lynis logrotate
+```
+
+**命令 1.4B（与 1.4A 二选一）：内核检查未通过时，安装依赖与 HWE 内核。**
 ```bash
 sudo apt-get install -y ca-certificates curl gnupg git python3-yaml jq lynis logrotate linux-generic-hwe-22.04
 ```
 
-**命令 1.5：重启；重新登录后再执行 1.6。**
+**命令 1.5（安装内核后执行）：重启；重新登录后再执行 1.6。**
 ```bash
 sudo reboot
 ```
 
-重新登录后检查内核，并启用 BPF LSM（保留当前启用的其他 LSM）：
+以下检查可在安装前执行；若安装了内核，则重启后重新执行。先确认内核能力，再决定是否启用 BPF LSM（保留当前启用的其他 LSM）：
 
 **命令 1.6：查看当前内核。**
 ```bash
