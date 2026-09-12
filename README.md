@@ -2,7 +2,7 @@
 
 把 Falco、BPF LSM、TSA、Lynis 组合成一条主机安全流水线：Falco 发现可疑行为并报警，BPF LSM 在内核对敏感文件做审计或阻断，TSA 汇总事件算风险分，Lynis 给系统基线分。
 
-> 看板仅本机访问，远程使用 SSH 转发或有鉴权的 TLS 代理；基线或采集不可用时评分接口返回 503。技术边界和旧版本升级注意事项见 [安全设计](SECURITY_STACK.md)。
+> 看板仅本机访问，远程使用 SSH 转发或有鉴权的 TLS 代理；基线或采集不可用时评分接口返回 503。技术边界和旧版本升级注意事项见本文第 8 节。
 
 - 从空白 Ubuntu 到部署验收（唯一复现入口）：[docs/INSTALL.md](docs/INSTALL.md)
 - clone 后规则在哪里、如何添加自定义规则：[docs/FALCO_RULES.md](docs/FALCO_RULES.md)
@@ -129,7 +129,7 @@ curl http://127.0.0.1:8766/systemManage/risk/score
 #    "data":{"final":100.0,"posture":100.0,"runtime":100.0,"generated_time":"..."}}
 ```
 
-`final` 是最终风险分（满分 100，越低越危险）。上例只适用于基线和采集就绪；否则 HTTP 503、`code:50000`、`data:null`。看板显示未知值，详见 [安全设计](SECURITY_STACK.md)。
+`final` 是最终风险分（满分 100，越低越危险）。上例只适用于基线和采集就绪；否则 HTTP 503、`code:50000`、`data:null`。看板显示未知值，具体条件见本文第 8 节。
 
 部署和验收只需按 [INSTALL.md](docs/INSTALL.md) 操作；规则维护查 [FALCO_RULES.md](docs/FALCO_RULES.md)，实测范围查 [VM_VALIDATION.md](docs/VM_VALIDATION.md)。
 
@@ -170,5 +170,53 @@ curl http://127.0.0.1:8766/systemManage/risk/score
 | BPF C、`vmlinux.h`、生成的 `.go/.o`、Go 源码与 `go.mod/go.sum` | 支持重新生成、离线构建和实际内核加载；删除对象文件会使 Go embed 编译失败 |
 | TSA 源码与策略、`systemd/`、`logrotate/` | 采集、评分、看板、开机启动、权限及日志轮转均在部署链路内 |
 | Go/Python 测试、`.github/workflows/tests.yml` | 总部署和 CI 的回归检查；减少文件不能以去掉安全测试为代价 |
+| 本 README、`docs/INSTALL.md`、`docs/FALCO_RULES.md`、`docs/VM_VALIDATION.md` | 分别承担项目总览与技术边界、唯一安装流程、规则维护、实测证据；不再单独保留安全设计文档 |
 
 本仓库只保留一套主机部署链路和一套 CI 测试入口。日志、数据库、工具链下载与控制器可执行文件属于本地产物，不提交 Git；不要清理已部署机器的历史证据或规则回滚备份。
+
+## 8. 安全设计与边界
+
+### 权限与阻断
+
+- Falco 只检测；TSA 和看板以普通用户运行，只读采集结果，不写 BPF Map、不修改内核策略。root 控制器负责校验 YAML、写 Map 和挂载程序，评分不会自动切换 `enforce`。
+- 控制器将绝对路径解析为 `device + inode`，映射到策略 ID、模式和过期时间。未命中、已过期或 UID 在允许名单中时，本项目不阻断；否则 `audit` 记录放行，`enforce` 记录并返回 `-EPERM`。
+- 六个 hooks：`file_permission`（写入）、`inode_unlink`（删除）、`inode_rename`（重命名或覆盖）、`inode_setattr`（属性）、`mmap_file`（新建共享可写映射）、`file_mprotect`（共享映射升级为可写）。ring buffer 只传递事件证据，阻断决策在内核完成。
+- 文件删除后以新 inode 重建，需要重启控制器刷新策略；未实现按父目录和文件名拦截新建。`allowed_uids` 仅按 UID 放行，不校验可执行文件签名或 cgroup。
+- 已存在的共享可写映射不会被后加载的策略撤销。应先在 audit 中验证正常访问和回滚，再切换 enforce，并重新启动相关工作负载。
+- BPF links 未 pin，控制器停止或重启存在保护空窗；root 能改变主机安全配置。
+
+### 评分与证据
+
+- `final = posture * 0.4 + runtime * 0.6`。`posture` 是本项目从 Lynis 报告计算的基线分，不等于 Lynis hardening index；`runtime` 根据未过期风险事件计算。权重仍需实验校准，不是安全认证。
+- 事件支持指纹去重、每规则每分钟限速、每规则风险上限及有效期；部署维护窗口不计分。两个事件源可分别扣分，日志轮转和历史清理不代表无限吞吐或磁盘保护。
+- 事件、去重、限速和日志位置在同一 SQLite 事务中提交，失败后重放未确认事件；已有日志首次接入默认从末尾读取，首次部署不能代替历史日志取证。
+- 看板在 3 秒窗口内优先按 PID 关联；Falco 缺少 PID 时按进程名与受保护路径匹配，并展示依据。关联只用于展示，不改变评分，也不是内核级唯一事务关联。
+- 基线需含 `report_version_major`、`finish=true`，默认一天有效；TSA 每 300 秒刷新，只读取报告。无基线不会自动给 100 分，显式禁用基线仅适用于运行时单项实验。
+- TSA 心跳超过 30 秒、启用的采集服务停止、日志不可读或基线无效时，健康与评分接口返回 HTTP 503、评分 `data:null`。服务 active 不足以证明采集正常。
+
+### 访问与升级
+
+- 看板只提供状态读取，拒绝非回环绑定并校验 Host，但仍信任本机用户。远程访问使用 SSH 或有鉴权的 TLS 代理，代理上游 Host 设为 `127.0.0.1:8766`；旧版遗留的防火墙开放规则需自行检查。
+- 升级按 [复现指南](docs/INSTALL.md) 重新部署，不要只替换 Python 文件。部署以普通用户构建、root 安装，通过 systemd 参数选择完整或纯检测模式，不重写源 YAML。
+- Falco 计分白名单位于 `runtime_rules.whitelist`，不支持旧的 `bpf_lsm.whitelist`。优先按精确规则条件设置例外，不要仅凭可伪造的进程名豁免风险。
+
+实际测试范围见 [验证记录](docs/VM_VALIDATION.md)，历史修复可查 Git 历史；上述设计不是无漏洞保证。
+
+## 9. 修改内核代码后构建
+
+标准构建链为 cilium/ebpf `bpf2go`。普通部署使用已提交的 `lsmbpf_x86_bpfel.go/.o`；修改内核 C 后才需重新生成。先安装 clang、llvm、libbpf-dev，将所选 Go 工具链加入 PATH，再在 Ubuntu 项目根目录依次执行：
+
+**命令 9.1：重新生成 BPF 对象与 Go 绑定。**
+```bash
+go generate ./...
+```
+
+**命令 9.2：运行 Go 竞态测试。**
+```bash
+go test -race ./...
+```
+
+**命令 9.3：运行 Go 静态检查。**
+```bash
+go vet ./...
+```

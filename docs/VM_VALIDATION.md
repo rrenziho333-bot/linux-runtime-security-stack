@@ -14,7 +14,7 @@
 | 依赖 | Falco 0.44.1 modern eBPF、Go 1.26.8、Python 3.10、真实 Lynis 报告 |
 | 镜像校验 | Ubuntu 20260829 构建；SHA256 `95553d7df39a2dfaee134036af10d9f8f253726f637e2fc84d0b8ac66a378e95`，与官方 HTTPS 清单一致 |
 
-安装指南的 7 个 Bash 代码块经过语法检查和逐块实际执行。APT 下载失败后配置阿里云 HTTPS 源及临时 SSH 代理，从失败命令继续；Git/Go 实际联网下载，未使用旧机缓存，未关闭 TLS、软件包签名或模块校验。VMware Workstation 16 在本机使用虚拟硬件版本 10 启动；处理 Tools/NTP 冲突、确认 UTC 时间正确后才生成基线。
+当时安装指南的 7 个 Bash 代码块经过语法检查和逐块实际执行；现指南已将命令拆分编号，不能将历史代码块数量当作当前步骤数。APT 下载失败后配置阿里云 HTTPS 源及临时 SSH 代理，从失败命令继续；Git/Go 实际联网下载，未使用旧机缓存，未关闭 TLS、软件包签名或模块校验。VMware Workstation 16 在本机使用虚拟硬件版本 10 启动；处理 Tools/NTP 冲突、确认 UTC 时间正确后才生成基线。
 
 ## 通过的检查
 
@@ -45,7 +45,7 @@
 - 新机 Lynis 原始 `hardening_index=57`，有软件包风险 `PKGS-7392` 与防火墙规则警告 `FIRE-4512`；本轮未做整机补丁升级或生产账户加固。
 - 首次验收 `posture=85.0, runtime=86.0, final=85.6`；测试和 SSH/sudo 行为会触发规则并降低分数，没有清空历史事件以制造高分。分数和告警都不能直接当作安全认证或真实入侵结论。
 - 已测试上述 Ubuntu/kernel/Falco 组合，不代表覆盖 Ubuntu 24.04、ARM、全部文件系统、长期压力或全部上游规则；完整模式仍需主机内核支持。
-- 控制器重启有保护空窗，已有共享映射和 inode 重建存在限制；详见 [安全设计](../SECURITY_STACK.md)。
+- 控制器重启有保护空窗，已有共享映射和 inode 重建存在限制；详见 [README](../README.md) 第 8 节“安全设计与边界”。
 - 之前在另一台 Ubuntu 22.04.5 / `6.8.0-60-generic` / Falco 0.42.1 完成过 13 项故障检查、BPF 重新生成和竞态测试；未在本轮新机重做全部故障注入，不能混用测试范围。完整历史记录保留在 [Git 历史](https://github.com/rrenziho333-bot/linux-runtime-security-stack/blob/21badc19d97c5b7fbc9cc2136574b7fc5d140a9f/docs/VM_VALIDATION.md)。
 
 **结论：上述干净 Ubuntu 路线的安装、检测、实际阻断、评分和冷启动恢复已验证通过；项目是可复现的安全实验系统，不是已完成生产安全准入的产品。**
