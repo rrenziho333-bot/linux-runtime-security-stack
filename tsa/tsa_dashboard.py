@@ -7,6 +7,7 @@ import argparse
 import ipaddress
 import json
 import logging
+import re
 import sqlite3
 import subprocess
 import time
@@ -24,80 +25,170 @@ import yaml
 HTML = r"""<!doctype html>
 <html lang="zh-CN">
 <head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>TSA 安全流水线</title>
-  <style>
-    :root{color-scheme:dark;--bg:#07111f;--panel:#0d1b2d;--line:#203550;--text:#eaf2ff;
-      --muted:#91a6c0;--blue:#55b6ff;--green:#4fd1a1;--yellow:#f3c969;--red:#ff7185}
-    *{box-sizing:border-box}body{margin:0;background:radial-gradient(circle at 15% 0,#102b48 0,var(--bg) 38%);
-      color:var(--text);font:14px/1.55 system-ui,-apple-system,"Segoe UI",sans-serif}
-    main{max-width:1280px;margin:auto;padding:24px}.top{display:flex;justify-content:space-between;gap:20px;align-items:center}
-    h1{font-size:24px;margin:0}h2{font-size:16px;margin:0 0 14px}.muted{color:var(--muted)}
-    .live{display:flex;align-items:center;gap:8px}.dot{width:9px;height:9px;border-radius:50%;background:var(--green);
-      box-shadow:0 0 12px var(--green)}.grid{display:grid;grid-template-columns:repeat(12,1fr);gap:14px;margin-top:18px}
-    .panel{background:rgba(13,27,45,.92);border:1px solid var(--line);border-radius:14px;padding:17px;
-      box-shadow:0 12px 30px rgba(0,0,0,.18)}.scores{grid-column:span 4}.pipeline{grid-column:span 8}
-    .policies{grid-column:span 4}.events{grid-column:span 8}.score-row{display:flex;gap:13px}
-    .score{flex:1;border:1px solid var(--line);border-radius:12px;padding:13px}.score strong{display:block;font-size:28px}
-    .score strong.unknown{font-size:16px;overflow-wrap:anywhere}
-    .stages{display:flex;align-items:stretch;gap:7px}.stage{flex:1;padding:11px;border:1px solid var(--line);
-      border-radius:10px;min-width:0}.stage.ok{border-color:#28755e}.stage.bad{border-color:#7c3442}.arrow{align-self:center;color:var(--muted)}
-    .badge{display:inline-block;border-radius:99px;padding:2px 8px;font-size:12px;border:1px solid var(--line)}
-    .audit{color:var(--yellow);border-color:#826c30}.deny{color:var(--red);border-color:#8c3544}
-    .falco{color:var(--blue);border-color:#28638d}.oktxt{color:var(--green)}.policy{padding:12px 0;border-top:1px solid var(--line)}
-    .policy:first-of-type{border-top:0}.policy-line{display:flex;justify-content:space-between;gap:10px}
-    .incident{border-top:1px solid var(--line);padding:15px 0}.incident:first-of-type{border-top:0;padding-top:0}
-    .incident-head{display:flex;justify-content:space-between;gap:12px}.steps{margin:10px 0 0;padding:0;list-style:none}
-    .steps li{position:relative;margin-left:8px;padding:4px 0 4px 20px;border-left:1px solid #31506f}
-    .steps li:before{content:"";position:absolute;left:-4px;top:12px;width:7px;height:7px;border-radius:50%;background:var(--blue)}
-    .raw{margin-top:8px}.raw summary{cursor:pointer;color:var(--muted)}pre{white-space:pre-wrap;word-break:break-word;
-      background:#081321;padding:10px;border-radius:8px;max-height:240px;overflow:auto;font-size:12px}
-    .empty{color:var(--muted);padding:18px 0}.error{background:#5f2631;padding:12px;border-radius:8px;margin-top:12px}
-    @media(max-width:900px){.scores,.pipeline,.policies,.events{grid-column:1/-1}.stages{flex-direction:column}.arrow{display:none}}
-  </style>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>TSA 主机安全监测</title>
+<style>
+:root{color-scheme:light;--bg:#f4f6f5;--paper:#fff;--ink:#202826;--muted:#65716c;--line:#dce3df;
+--green:#147257;--red:#b52c3e;--amber:#88610c;--blue:#276b91}
+*{box-sizing:border-box;letter-spacing:0}body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif}
+main{max-width:1440px;margin:auto;padding:24px 28px}h1{font-size:24px;margin:0}h2{font-size:17px;margin:0}p{margin:0}
+.top,.section-head,.toolbar,.service,.policy-line{display:flex;align-items:center;justify-content:space-between;gap:12px}
+.top{padding-bottom:20px;border-bottom:1px solid var(--line);align-items:flex-start}.muted,small{color:var(--muted)}
+.refresh{text-align:right;font-size:12px;font-variant-numeric:tabular-nums}.refresh strong{display:block;color:var(--green)}
+.overview{display:grid;grid-template-columns:1fr 1.4fr;border-bottom:1px solid var(--line);background:var(--paper)}
+.score-row{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));padding:20px 0}
+.score{padding:0 20px;border-right:1px solid var(--line)}.score strong{display:block;font-size:30px;font-variant-numeric:tabular-nums;line-height:1.3}
+.score:first-child strong{color:var(--green)}.score small{font-size:11px}.score strong.unknown{font-size:20px}
+.components{padding:20px 24px}.services{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px 24px;margin-top:12px}
+.service{min-width:0}.service small{display:block}.state{white-space:nowrap;font-size:12px;color:var(--green)}.state.bad{color:var(--red)}
+section.policies{padding:18px 0;border-bottom:1px solid var(--line)}.policy{padding-top:12px}.policy-line{justify-content:flex-start;flex-wrap:wrap}
+.policy-path{overflow-wrap:anywhere}.badge{font-size:12px;padding:2px 6px;white-space:nowrap;border-radius:3px;display:inline-block}
+.audit{color:var(--amber);background:#fff3d5}.deny{color:var(--red);background:#fce8eb}.falco{color:var(--blue);background:#e9f3f9}
+section.events{padding-top:22px}.section-head{align-items:flex-start}.toolbar{justify-content:flex-start;flex-wrap:wrap;margin:16px 0 12px}
+label{display:flex;align-items:center;gap:7px;font-size:13px}input,select{font:inherit;color:inherit;background:var(--paper);border:1px solid #bcc9c1;border-radius:4px;padding:7px 9px;min-height:36px;max-width:100%}
+input{width:260px}select{max-width:270px}input:focus-visible,select:focus-visible,summary:focus-visible{outline:2px solid var(--green);outline-offset:3px}
+.table-head,.event-summary{display:grid;grid-template-columns:minmax(175px,1.2fr) minmax(220px,2.2fr) minmax(110px,1fr) 95px 80px;gap:14px;align-items:center}
+.table-head{padding:9px 14px;color:var(--muted);font-size:12px;border-bottom:1px solid var(--line)}
+.incident{border-bottom:1px solid var(--line);background:var(--paper)}.event-summary{padding:14px;cursor:pointer;list-style:none}
+.event-summary::-webkit-details-marker{display:none}.event-summary:hover{background:#f1f7f3}.incident[open]>.event-summary{background:#eaf3ed}
+.event-summary>div{min-width:0}.event-title{display:flex;gap:8px;align-items:flex-start;overflow-wrap:anywhere;font-weight:600}
+.event-title:before{content:"▸";flex:none;color:var(--muted)}.incident[open]>.event-summary .event-title:before{content:"▾"}
+.time{display:block;font-size:13px;font-variant-numeric:tabular-nums;white-space:nowrap}.subline{display:block;color:var(--muted);font-size:12px;overflow-wrap:anywhere}
+.source{font-size:12px}.points{text-align:right;font-variant-numeric:tabular-nums;font-weight:600}
+.detail{padding:16px 24px 20px;border-top:1px solid var(--line);display:grid;grid-template-columns:1fr 1fr;gap:18px}
+.detail h3{font-size:14px;margin:0 0 8px}.steps{padding-left:20px;margin:0}.steps li{margin:6px 0;overflow-wrap:anywhere}
+.evidence-row{padding:8px 0;border-bottom:1px solid var(--line);overflow-wrap:anywhere}
+.raw{grid-column:1/-1}.raw summary{cursor:pointer;color:var(--muted);font-size:13px}pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#f4f6f5;max-height:300px;overflow:auto;padding:12px;font-size:12px}
+.error{background:#fce8eb;border-left:3px solid var(--red);padding:12px;margin:12px 0;overflow-wrap:anywhere}
+.empty{padding:30px 14px;color:var(--muted);background:var(--paper)}.stale #pipeline,.stale #events,.stale #policies{opacity:.55}
+@media(max-width:1000px){.overview{grid-template-columns:1fr}.score:last-child{border-right:0}.components{border-top:1px solid var(--line)}
+.table-head,.event-summary{grid-template-columns:minmax(160px,1fr) minmax(180px,2fr) 100px 85px 65px;gap:10px}}
+@media(max-width:700px){main{padding:16px 12px}.top{flex-direction:column;gap:10px}.refresh{text-align:left}h1{font-size:21px}
+.score{padding:0 12px}.score strong{font-size:26px}.components{padding:16px 12px}.services{gap:12px}.section-head{flex-direction:column}
+.toolbar{align-items:stretch}.toolbar label{flex:1 1 100%;justify-content:space-between}input,select{width:75%;max-width:none}
+.table-head{display:none}.event-summary{grid-template-columns:minmax(0,1fr) auto;padding:13px;gap:9px}
+.event-summary .event-main{grid-column:1/-1;grid-row:1}.event-summary .when{grid-column:1;grid-row:2}
+.event-summary .outcome{grid-column:2;grid-row:2}.event-summary .source{grid-column:1;grid-row:3}
+.event-summary .points{grid-column:2;grid-row:3}.detail{grid-template-columns:1fr;padding:14px}.raw{grid-column:1}
+}
+</style>
 </head>
 <body><main>
-  <div class="top"><div><h1>TSA 安全事件流水线</h1><div class="muted">Falco 观察 · BPF LSM 决策 · TSA 融合评分</div></div>
-    <div class="live"><span class="dot"></span><span id="refresh">正在连接本机数据</span></div></div>
-  <div id="error"></div>
-  <div class="grid">
-    <section class="panel scores"><h2>风险评分</h2><div id="scores" class="score-row"></div></section>
-    <section class="panel pipeline"><h2>组件流水线</h2><div id="pipeline" class="stages"></div></section>
-    <section class="panel policies"><h2>BPF LSM 保护策略</h2><div id="policies"></div></section>
-    <section class="panel events"><h2>最近操作与证据链</h2><div id="events"></div></section>
-  </div>
+<header class="top"><h1>TSA 主机安全监测</h1><div class="refresh" role="status"><strong id="connection">正在连接</strong><span id="refresh">页面刷新：—</span><div id="zone-label"></div></div></header>
+<div id="error" role="alert"></div>
+<div class="overview">
+<div id="scores" class="score-row" aria-label="风险评分"></div>
+<section class="components"><h2>组件状态</h2><div id="pipeline" class="services"></div></section>
+</div>
+<section class="policies"><h2>BPF LSM 保护策略</h2><div id="policies"></div></section>
+<section class="events">
+<div class="section-head"><h2>最近事件 <span id="event-count" class="muted"></span></h2><span id="window" class="muted"></span></div>
+<div class="toolbar">
+<label>筛选<select id="filter"><option value="all">全部事件</option><option value="deny">已拦截</option><option value="audit">审计放行</option><option value="falco">仅 Falco 告警</option></select></label>
+<label>搜索<input id="search" type="search" placeholder="规则、进程、路径或事件编号" autocomplete="off"></label>
+<label>时区<select id="timezone"><option value="local">浏览器本地时区</option><option value="UTC">UTC</option></select></label>
+</div>
+<div class="table-head" aria-hidden="true"><span>事件 / 采集时间</span><span>事件与进程</span><span>证据来源</span><span>结果</span><span style="text-align:right">当次扣分</span></div>
+<div id="events"></div>
+</section>
 </main>
 <script>
-const esc=v=>String(v??"");
-function el(tag,cls,text){const n=document.createElement(tag);if(cls)n.className=cls;if(text!==undefined)n.textContent=esc(text);return n}
-function renderScore(data){const root=document.querySelector("#scores");root.replaceChildren();
-  [["最终",data.final],["基线",data.posture],["运行时",data.runtime]].forEach(([name,val])=>{
-    const box=el("div","score");box.append(el("span","muted",name),el("strong",val==null?"unknown":"",val==null?"未评估":Number(val).toFixed(1)));root.append(box)})}
-function renderPipeline(stages){const root=document.querySelector("#pipeline");root.replaceChildren();
-  stages.forEach((s,i)=>{const box=el("div","stage "+(s.active?"ok":"bad"));box.append(el("strong","",s.name),
-    el("div",s.active?"oktxt":"muted",s.status),el("small","muted",s.detail));root.append(box);
-    if(i<stages.length-1)root.append(el("span","arrow","→"))})}
-function renderPolicies(items){const root=document.querySelector("#policies");root.replaceChildren();
-  if(!items.length){root.append(el("div","empty","没有加载 BPF LSM 策略"));return}
+const $=s=>document.querySelector(s);
+const localZone=Intl.DateTimeFormat().resolvedOptions().timeZone||"UTC";
+const timeKinds={falco_event:"Falco 发生时间",bpf_received:"BPF 控制器收件时间",tsa_received:"TSA 入库时间"};
+const sourceNames={falco:"Falco",bpf_lsm:"BPF LSM"};
+const statusNames={scored:"已计分",duplicate:"去重，不重复扣分",rate_limited:"限速，不扣分",maintenance:"维护，不扣分",maintenance_reclassified:"维护，不扣分",whitelisted:"白名单，不扣分",ignored:"不计分"};
+const ruleNames={"Program run with disallowed http proxy env":"进程使用未允许的代理环境","Write below etc":"写入 /etc 下的文件","Monitor specific file access":"打开演示保护文件"};
+const operationNames={write:"写入",unlink:"删除",rename:"重命名",setattr:"修改属性",mmap:"共享可写映射",mprotect:"升级映射写权限"};
+let current=null,eventSignature="",pending=false;
+const expanded=new Set();
+function el(tag,cls,text){const n=document.createElement(tag);if(cls)n.className=cls;if(text!==undefined)n.textContent=String(text??"");return n}
+function zone(){return $("#timezone").value==="UTC"?"UTC":localZone}
+function formatTime(value){
+  if(!value)return "未知";
+  const date=new Date(String(value).replace(/(\.\d{3})\d+(?=Z|[+-]\d\d:\d\d$)/,"$1"));
+  if(!Number.isFinite(date.getTime()))return "时间无效";
+  const parts=new Intl.DateTimeFormat("zh-CN",{timeZone:zone(),year:"numeric",month:"2-digit",day:"2-digit",hour:"2-digit",minute:"2-digit",second:"2-digit",fractionalSecondDigits:3,hourCycle:"h23"}).formatToParts(date);
+  const p=Object.fromEntries(parts.map(x=>[x.type,x.value]));
+  return p.year+"-"+p.month+"-"+p.day+" "+p.hour+":"+p.minute+":"+p.second+"."+p.fractionalSecond;
+}
+function renderScore(data){const root=$("#scores");root.replaceChildren();
+  [["综合评分",data.final,"0-100 · 越低风险越高"],["基线评分",data.posture,"Lynis 报告计分"],["运行时评分",data.runtime,"未过期事件计分"]].forEach(([name,val,note])=>{
+    const box=el("div","score");box.append(el("span","muted",name),el("strong",val==null?"unknown":"",val==null?"未评估":Number(val).toFixed(1)),el("small","",note));root.append(box)})}
+function renderPipeline(stages){const root=$("#pipeline");root.replaceChildren();
+  stages.forEach(s=>{const box=el("div","service");const left=el("div");left.append(el("strong","",s.name),el("small","",s.detail));
+    const status=el("span","state"+(s.active?"":" bad"),s.active?"运行中":({"inactive":"未运行","failed":"失败","activating":"启动中"}[s.status]||s.status));
+    box.append(left,status);root.append(box)})}
+function renderPolicies(items){const root=$("#policies");root.replaceChildren();
+  if(!items.length){root.append(el("div","empty","暂无保护策略"));return}
   items.forEach(p=>{const box=el("div","policy");const line=el("div","policy-line");
-    line.append(el("strong","",p.name),el("span","badge "+p.mode,p.mode.toUpperCase()));box.append(line);
-    box.append(el("div","muted","保护："+p.paths.join(", ")),el("div","muted","策略 ID："+p.id+" · 允许 UID："+(p.allowed_uids.join(", ")||"无")));
-    root.append(box)})}
-function renderEvents(items){const root=document.querySelector("#events");root.replaceChildren();
-  if(!items.length){root.append(el("div","empty","尚无安全事件。对保护文件执行测试操作后会出现在这里。"));return}
-  items.forEach(x=>{const box=el("article","incident");const head=el("div","incident-head");const left=el("div");
-    left.append(el("strong","",x.title),el("div","muted",x.time+" · PID "+(x.pid||"未知")));
-    head.append(left,el("span","badge "+x.badge_class,x.decision));box.append(head);
-    const steps=el("ol","steps");x.steps.forEach(s=>steps.append(el("li","",s)));box.append(steps);
-    const raw=document.createElement("details");raw.className="raw";raw.append(el("summary","","查看原始证据"));
-    raw.append(el("pre","",JSON.stringify(x.evidence,null,2)));box.append(raw);root.append(box)})}
-async function refresh(){try{const r=await fetch("/api/status",{cache:"no-store"});if(!r.ok)throw Error("HTTP "+r.status);
-  const d=await r.json();renderScore(d.scores);renderPipeline(d.pipeline);renderPolicies(d.policies);renderEvents(d.incidents);
-  document.querySelector("#refresh").textContent="已更新 "+new Date(d.generated_time).toLocaleTimeString();
-  document.querySelector("#error").replaceChildren();if(!d.availability.ready)document.querySelector("#error").append(el("div","error",d.availability.reason))}catch(e){const box=el("div","error","读取看板数据失败："+e.message);
-  renderScore({final:null,posture:null,runtime:null});document.querySelector("#error").replaceChildren(box);document.querySelector("#refresh").textContent="连接异常"}}
-refresh();setInterval(refresh,2000);
+    line.append(el("strong","",p.name),el("span","badge "+(p.mode==="enforce"?"deny":"audit"),({enforce:"ENFORCE · 拒绝",audit:"AUDIT · 放行"}[p.mode]||"模式未知")),el("span","muted","策略 #"+p.id+" · 允许 UID："+(p.allowed_uids.join(", ")||"无")));
+    box.append(line,el("div","policy-path",p.paths.join(", ")));root.append(box)})}
+function groupTitle(x){const b=x.evidence.bpf_lsm;
+  if(b)return (operationNames[b.operation]||b.operation||"文件操作")+" · "+(b.policy_name||"保护策略");
+  const f=x.evidence.falco;return ruleNames[f.rule]||f.rule||x.title}
+function renderEvents(force=false){
+  if(!current)return;
+  const items=current.incidents,filter=$("#filter").value,query=$("#search").value.trim().toLowerCase();
+  const signature=JSON.stringify([items,filter,query,zone()]);
+  if(!force&&signature===eventSignature)return;
+  eventSignature=signature;
+  const selected=items.filter(x=>(filter==="all"||x.badge_class===filter)&&(!query||[x.id,x.title,groupTitle(x),x.process,x.target,x.pid,...Object.entries(x.evidence).map(([s,e])=>s+":"+e.id+" "+(e.command||""))].join(" ").toLowerCase().includes(query)));
+  $("#event-count").textContent="· "+selected.length+" / "+items.length+" 组";
+  const root=$("#events");root.replaceChildren();
+  if(!selected.length){root.append(el("div","empty",items.length?"没有符合条件的事件":"暂无事件"));return}
+  selected.forEach(x=>{
+    const box=el("details","incident");box.dataset.openKey=x.id;box.open=expanded.has(x.id);
+    const head=el("summary","event-summary");const when=el("div","when");const t=el("time","time",formatTime(x.display_time));t.dateTime=x.display_time;t.title=x.display_time;
+    when.append(t,el("span","subline",timeKinds[x.time_kind]));
+    const main=el("div","event-main");main.append(el("div","event-title",groupTitle(x)),el("span","subline",(x.process||"进程未知")+" · PID "+(x.pid||"未知")+" · "+x.id));
+    if(x.target)main.append(el("span","subline",x.target));
+    const sources=el("div","source",x.sources.map(s=>sourceNames[s]||s).join(" + "));
+    sources.append(el("span","subline",x.sources.length===2?"关联证据":"单源记录"));
+    const outcome=el("div","outcome");outcome.append(el("span","badge "+x.badge_class,x.decision));
+    const points=el("div","points",x.deducted_points?"−"+x.deducted_points:"0");
+    head.append(when,main,sources,outcome,points);box.append(head);
+    const detail=el("div","detail"),chain=el("div");chain.append(el("h3","","处理记录"));
+    const steps=el("ol","steps");x.steps.forEach(s=>steps.append(el("li","",s)));chain.append(steps);
+    const ev=el("div");ev.append(el("h3","","证据与时间"));
+    Object.entries(x.evidence).forEach(([source,item])=>{
+      const row=el("div","evidence-row");row.append(el("strong","",(sourceNames[source]||source)+" #"+item.id),el("div","",item.rule),
+        el("div","subline",(source==="falco"?"事件发生：":"控制器收件：")+formatTime(item.event_time)),
+        el("div","subline","TSA 入库："+formatTime(item.received_time)),
+        el("div","subline",(statusNames[item.status]||item.status)+" · 当次扣分 "+item.deducted_points));
+      if(item.command)row.append(el("div","subline","命令："+item.command));ev.append(row)});
+    const raw=el("details","raw");raw.dataset.openKey=x.id+":raw";raw.open=expanded.has(raw.dataset.openKey);
+    raw.append(el("summary","","入库证据 JSON"),el("pre","",JSON.stringify(x.evidence,null,2)));
+    detail.append(chain,ev,raw);box.append(detail);root.append(box);
+  });
+}
+$("#events").addEventListener("toggle",e=>{if(!$("#events").contains(e.target)||!e.target.dataset.openKey)return;
+  if(e.target.open)expanded.add(e.target.dataset.openKey);else expanded.delete(e.target.dataset.openKey)},true);
+function render(){
+  renderScore(current.scores);renderPipeline(current.pipeline);renderPolicies(current.policies);renderEvents();
+  $("#refresh").textContent="页面刷新："+formatTime(current.generated_time);
+  $("#zone-label").textContent="显示时区："+zone();
+  $("#window").textContent="最近 "+(current.event_window?.records??"—")+" 条入库记录 · 按入库时间倒序";
+}
+$("#timezone").options[0].textContent="本地 · "+localZone;
+$("#timezone").addEventListener("change",()=>{if(current)render();if(document.body.classList.contains("stale"))renderScore({final:null,posture:null,runtime:null})});
+$("#filter").addEventListener("change",()=>renderEvents());
+$("#search").addEventListener("input",()=>renderEvents());
+async function refresh(){
+  if(pending)return;pending=true;
+  try{
+    const r=await fetch("/api/status",{cache:"no-store",signal:AbortSignal.timeout(8000)});
+    if(!r.ok)throw Error("HTTP "+r.status);
+    current=await r.json();render();document.body.classList.remove("stale");$("#error").replaceChildren();
+    $("#connection").textContent=current.availability.ready?"数据正常":"数据未就绪";
+    if(!current.availability.ready)$("#error").append(el("div","error",current.availability.reason));
+  }catch(e){
+    document.body.classList.add("stale");renderScore({final:null,posture:null,runtime:null});
+    $("#connection").textContent="连接异常";$("#error").replaceChildren(el("div","error","数据刷新失败："+e.message));
+  }finally{pending=false;setTimeout(refresh,2000)}
+}
+refresh();
 </script></body></html>"""
 
 
@@ -109,7 +200,10 @@ def parse_time(value: str) -> float:
     if not value:
         return 0.0
     try:
-        return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
+        # Falco emits nanoseconds; Python 3.10's ISO parser expects microseconds.
+        normalized = re.sub(r"\.\d+(?=Z|[+-]\d{2}:\d{2}$)",
+                            lambda match: match.group()[:7].ljust(7, "0"), value)
+        return datetime.fromisoformat(normalized.replace("Z", "+00:00")).timestamp()
     except ValueError:
         return 0.0
 
@@ -391,6 +485,22 @@ class DashboardData:
         incidents.sort(key=lambda item: item["_timestamp"], reverse=True)
         for incident in incidents:
             incident.pop("_timestamp", None)
+            evidence = incident["evidence"]
+            primary = evidence.get("bpf_lsm", evidence.get("falco"))
+            source = "bpf_lsm" if "bpf_lsm" in evidence else "falco"
+            event_time = str(primary.get("event_time", ""))
+            has_event_time = bool(parse_time(event_time))
+            incident.update({
+                "id": f"{source}:{primary['id']}",
+                "display_time": event_time if has_event_time else primary.get("received_time", ""),
+                "time_kind": ("bpf_received" if source == "bpf_lsm" else "falco_event")
+                if has_event_time else "tsa_received",
+                "received_time": primary.get("received_time", ""),
+                "process": primary.get("process") or primary.get("command", ""),
+                "target": evidence.get("falco", {}).get("file", ""),
+                "sources": list(evidence),
+                "deducted_points": sum(int(item.get("deducted_points", 0)) for item in evidence.values()),
+            })
         return incidents[:30]
 
     def scores(self) -> Dict[str, Optional[float]]:
@@ -452,6 +562,7 @@ class DashboardData:
             "pipeline": pipeline,
             "policies": policies,
             "incidents": self._incidents(events),
+            "event_window": {"records": len(events), "limit": 80},
         }
 
 

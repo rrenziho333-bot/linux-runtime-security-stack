@@ -62,6 +62,7 @@ policies:
         points=0,
         status="scored",
         expires=None,
+        event_time=None,
     ):
         with sqlite3.connect(self.db_path) as db:
             db.execute(
@@ -73,7 +74,7 @@ policies:
                 """,
                 (
                     received_time,
-                    received_time,
+                    received_time if event_time is None else event_time,
                     source,
                     rule,
                     status,
@@ -130,6 +131,45 @@ policies:
         self.assertEqual(incidents[0]["decision"], "审计放行")
         self.assertIn("falco", incidents[0]["evidence"])
         self.assertIn("操作继续执行", " ".join(incidents[0]["steps"]))
+        self.assertEqual(incidents[0]["id"], "bpf_lsm:2")
+        self.assertEqual(incidents[0]["deducted_points"], 12)
+        self.assertEqual(incidents[0]["time_kind"], "bpf_received")
+        self.assertEqual(incidents[0]["sources"], ["bpf_lsm", "falco"])
+
+    @patch("tsa_dashboard.service_state", return_value="active")
+    def test_source_time_is_separate_from_ingestion_time(self, _service):
+        source_time = "2026-09-12T11:17:26.971567484Z"
+        received = "2026-09-12T11:17:28+00:00"
+        self.insert_event(source="falco", rule="proxy", payload={"process": "curl"},
+                          event_time=source_time, received_time=received)
+        snapshot = DashboardData(self.config, self.policy).snapshot()
+        incident = snapshot["incidents"][0]
+        self.assertEqual(incident["display_time"], source_time)
+        self.assertEqual(incident["received_time"], received)
+        self.assertEqual(incident["time"], received)
+        self.assertEqual(incident["time_kind"], "falco_event")
+        self.assertEqual(snapshot["event_window"], {"records": 1, "limit": 80})
+
+    @patch("tsa_dashboard.service_state", return_value="active")
+    def test_missing_source_time_is_labeled_as_ingestion_not_occurrence(self, _service):
+        for source in ("falco", "bpf_lsm"):
+            self.insert_event(source=source, rule=source, payload={}, event_time="invalid")
+        incidents = DashboardData(self.config, self.policy).snapshot()["incidents"]
+        self.assertEqual(len(incidents), 2)
+        for incident in incidents:
+            self.assertEqual(incident["time_kind"], "tsa_received")
+            self.assertEqual(incident["display_time"], incident["received_time"])
+
+    @patch("tsa_dashboard.service_state", return_value="active")
+    def test_repeated_rule_events_remain_identifiable_records(self, _service):
+        for second in (1, 2):
+            self.insert_event(source="falco", rule="proxy", payload={"process": "curl"},
+                              received_time=f"2026-01-01T00:00:0{second}+00:00",
+                              status="duplicate" if second == 2 else "scored",
+                              points=0 if second == 2 else 2)
+        incidents = DashboardData(self.config, self.policy).snapshot()["incidents"]
+        self.assertEqual([item["id"] for item in incidents], ["falco:2", "falco:1"])
+        self.assertEqual([item["deducted_points"] for item in incidents], [0, 2])
 
     @patch("tsa_dashboard.service_state", return_value="active")
     def test_missing_falco_pid_falls_back_to_process_path_and_time(self, _service):
