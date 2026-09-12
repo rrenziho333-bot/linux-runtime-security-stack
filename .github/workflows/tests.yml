@@ -20,4 +20,4 @@ jobs:
         working-directory: tsa
         run: python3 -m unittest discover -s tests -v
       - name: Shell syntax
-        run: bash -n deploy-security-stack.sh falco/deploy-host-falco.sh falco/fetch-official-rules.sh
+        run: bash -n deploy-security-stack.sh falco/deploy-host-falco.sh

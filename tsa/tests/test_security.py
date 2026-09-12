@@ -1,11 +1,8 @@
 import json
 import itertools
-import io
-import importlib.util
 import os
 import sqlite3
 import tempfile
-import tarfile
 import threading
 import time
 import unittest
@@ -281,43 +278,6 @@ class SecurityTests(unittest.TestCase):
     def test_non_loopback_bind_is_rejected(self):
         with self.assertRaises(ValueError):
             DashboardServer(("0.0.0.0", 0), DashboardHandler)
-
-    def test_archive_extractor_rejects_traversal_links_and_duplicates(self):
-        script = Path(__file__).resolve().parents[2] / "falco" / "extract_rule_snapshot.py"
-        spec = importlib.util.spec_from_file_location("extract_rule_snapshot", script)
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
-        for unsafe in ("../outside", "/absolute", "link", "duplicate"):
-            with self.subTest(unsafe=unsafe):
-                archive = self.root / "rules.tar.gz"
-                with tarfile.open(archive, "w:gz") as output:
-                    for name in module.RULE_FILES:
-                        item = tarfile.TarInfo("release/" + name)
-                        item.size = 1
-                        output.addfile(item, io.BytesIO(b"x"))
-                    item = tarfile.TarInfo("extra/falco_rules.yaml" if unsafe == "duplicate" else unsafe)
-                    if unsafe == "link":
-                        item.type = tarfile.SYMTYPE
-                        item.linkname = "../../outside"
-                    output.addfile(item)
-                with self.assertRaises(ValueError):
-                    module.extract_rules(archive, self.root)
-                self.assertFalse((self.root / "falco_rules.yaml").exists())
-
-    def test_archive_extractor_copies_only_expected_regular_files(self):
-        script = Path(__file__).resolve().parents[2] / "falco" / "extract_rule_snapshot.py"
-        spec = importlib.util.spec_from_file_location("extract_rule_snapshot", script)
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
-        archive = self.root / "rules.tar.gz"
-        with tarfile.open(archive, "w:gz") as output:
-            for name in (*module.RULE_FILES, "unrelated.txt"):
-                item = tarfile.TarInfo("release/" + name)
-                item.size = 1
-                output.addfile(item, io.BytesIO(b"x"))
-        module.extract_rules(archive, self.root)
-        self.assertFalse((self.root / "unrelated.txt").exists())
-        self.assertEqual((self.root / "falco_rules.yaml").read_bytes(), b"x")
 
 
 if __name__ == "__main__":

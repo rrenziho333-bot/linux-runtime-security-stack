@@ -23,7 +23,7 @@
 | `91-custom-rules.yaml` | 自定义入口，初始 `[]` 表示没有自定义规则 | 文件名非强制，也可新增其他 `*.yaml` |
 | `95-security-stack-exceptions.yaml` | 为控制器加载 BPF、falcoctl 写入 `/root/.sigstore/` 设置告警例外 | 非启动必需；删除可能增加组件自身告警，建议保留 |
 
-`95` 只调整相关检测条件，不关闭整套规则或放开 BPF 阻断。官方文件由 `falco/rules.lock.json` 校验，来源记录在 `VERSION.txt`；日常修改放在 `rules.d/`，不要直接改官方文件。
+`95` 只调整相关检测条件，不关闭整套规则或放开 BPF 阻断。官方文件由 `falco/rules.lock.json` 校验；日常修改放在 `rules.d/`，不要直接改官方文件。现有快照来自 [falcosecurity/rules](https://github.com/falcosecurity/rules)，精确上游 tag 未知，校验和仅固定内容，不证明发布身份。
 
 ## 3. 安装后规则在哪里
 
