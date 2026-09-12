@@ -36,8 +36,25 @@ python3 - "${FALCO_CONFIG}" > /etc/falco/config.d/zz-security-stack-output.yaml 
 from pathlib import Path
 import re
 import sys
+import yaml
 
 cfg = Path(sys.argv[1]).read_text(encoding="utf-8")
+document = yaml.safe_load(cfg) or {}
+extra = list(document.get("append_output") or [])
+# Preserve host output enrichment, including Falco's suggested container fields.
+for item in document.get("config_files", []):
+    path = Path(item["path"] if isinstance(item, dict) else item)
+    strategy = item.get("strategy", "override") if isinstance(item, dict) else "override"
+    files = sorted(path.glob("*.y*ml")) if path.is_dir() else [path]
+    for file in files:
+        if not file.is_file() or file.name == "zz-security-stack-output.yaml":
+            continue
+        settings = yaml.safe_load(file.read_text(encoding="utf-8")) or {}
+        if "append_output" in settings:
+            values = settings["append_output"] or []
+            extra = extra + values if strategy == "append" else list(values)
+extra.append({"match": {"source": "syscall"}, "extra_fields": [
+    "proc.pid", "proc.exepath", "user.uid", "evt.type", "evt.is_open_write", "evt.rawres"]})
 
 # Detect whether `json_output` is a scalar (Falco >= 0.44, e.g. "json_output:
 # true") or a map (older Falco, "json_output:\n  enabled: true"). Emitting the
@@ -63,6 +80,7 @@ lines += [
     "  filename: /var/log/falco/falco.json",
 ]
 sys.stdout.write("\n".join(lines) + "\n")
+sys.stdout.write(yaml.safe_dump({"append_output": extra}, sort_keys=False))
 PY
 chmod 0644 /etc/falco/config.d/zz-security-stack-output.yaml
 

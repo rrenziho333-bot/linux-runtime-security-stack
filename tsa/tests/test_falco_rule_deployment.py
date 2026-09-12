@@ -2,6 +2,7 @@ import importlib.util
 import json
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -16,6 +17,23 @@ SPEC.loader.exec_module(rules)
 
 
 class RuleDeploymentTests(unittest.TestCase):
+    def test_output_enrichment_preserves_host_fields_and_adds_process_identity(self):
+        patch.stopall()  # This test runs the renderer, not the mocked Falco CLI.
+        script = SCRIPT.with_name('deploy-host-falco.sh').read_text(encoding='utf-8')
+        program = script.split("<<'PY'\n", 1)[1].split('\nPY\n', 1)[0]
+        self.original['append_output'] = [{'suggested_output': True}]
+        self.original['config_files'] = [{'path': str(self.etc / 'config.d'), 'strategy': 'append'}]
+        self.config.write_text(yaml.safe_dump(self.original), encoding='utf-8')
+        (self.etc / 'config.d' / 'host.yaml').write_text('append_output:\n- extra_fields: [proc.ppid]\n')
+        result = subprocess.run([sys.executable, '-X', 'utf8', '-', str(self.config)], input=program,
+                                capture_output=True, text=True, encoding='utf-8', check=True, timeout=10)
+        config = yaml.safe_load(result.stdout)
+        self.assertTrue(config['json_output'])
+        self.assertEqual(config['append_output'][0], {'suggested_output': True})
+        self.assertEqual(config['append_output'][1]['extra_fields'], ['proc.ppid'])
+        self.assertIn('proc.pid', config['append_output'][2]['extra_fields'])
+        self.assertIn('evt.is_open_write', config['append_output'][2]['extra_fields'])
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)

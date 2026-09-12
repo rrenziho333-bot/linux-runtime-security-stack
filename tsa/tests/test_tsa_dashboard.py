@@ -107,7 +107,7 @@ policies:
         self.insert_event(
             source="falco",
             rule="Write below etc",
-            payload={"pid": 77, "process": "tee"},
+            payload={"pid": 77, "process": "tee", "file": "/etc/test"},
             received_time="2026-01-01T00:00:01+00:00",
             points=10,
             expires=time.time() + 60,
@@ -130,7 +130,9 @@ policies:
         self.assertEqual(len(incidents), 1)
         self.assertEqual(incidents[0]["decision"], "审计放行")
         self.assertIn("falco", incidents[0]["evidence"])
-        self.assertIn("操作继续执行", " ".join(incidents[0]["steps"]))
+        self.assertIn("最终写入是否成功", " ".join(incidents[0]["steps"]))
+        self.assertIn("Falco 独立计分", " ".join(incidents[0]["steps"]))
+        self.assertEqual(incidents[0]["correlation"], "heuristic")
         self.assertEqual(incidents[0]["id"], "bpf_lsm:2")
         self.assertEqual(incidents[0]["deducted_points"], 12)
         self.assertEqual(incidents[0]["time_kind"], "bpf_received")
@@ -148,7 +150,8 @@ policies:
         self.assertEqual(incident["received_time"], received)
         self.assertEqual(incident["time"], received)
         self.assertEqual(incident["time_kind"], "falco_event")
-        self.assertEqual(snapshot["event_window"], {"records": 1, "limit": 80})
+        self.assertEqual(snapshot["event_window"]["records"], 1)
+        self.assertFalse(snapshot["event_window"]["has_more"])
 
     @patch("tsa_dashboard.service_state", return_value="active")
     def test_missing_source_time_is_labeled_as_ingestion_not_occurrence(self, _service):
@@ -192,7 +195,7 @@ policies:
             received_time="2026-01-01T00:00:02+00:00",
         )
         incident = DashboardData(self.config, self.policy).snapshot()["incidents"][0]
-        self.assertIn("进程名 + 保护路径 + 时间", " ".join(incident["steps"]))
+        self.assertIn("进程名 + 保护路径 + 操作 + 源时间", " ".join(incident["steps"]))
         self.assertIn("falco", incident["evidence"])
 
     @patch("tsa_dashboard.service_state", return_value="active")
@@ -227,6 +230,70 @@ policies:
         data = DashboardData(self.config, self.policy)
         data.config["scoring"] = {"weights": {"posture": 0, "runtime": 0}}
         self.assertEqual(data.scores()["final"], 92)
+
+    def test_similar_activity_summary_retains_all_evidence_and_zero_reasons(self):
+        for n in range(1, 6):
+            self.insert_event(source="falco", rule="Read sensitive file untrusted",
+                              payload={"process": "gdm-session-wor", "file": f"/etc/pam.d/file{n}"},
+                              received_time=f"2026-01-01T00:00:0{n}+00:00",
+                              status="scored" if n <= 2 else "rate_limited", points=5 if n <= 2 else 0)
+        data = DashboardData(self.config, self.policy)
+        with data._connect() as db:
+            incidents = data._incidents(data._events(db))
+        groups = data._summaries(incidents)
+        self.assertEqual(len(groups), 1)
+        group = groups[0]
+        self.assertEqual(group["record_count"], 5)
+        self.assertEqual(group["deducted_points"], 10)
+        self.assertEqual(group["status_counts"], {"rate_limited": 3, "scored": 2})
+        self.assertEqual(len(group["targets"]), 5)
+        self.assertEqual({m["id"] for m in group["members"]}, {f"falco:{i}" for i in range(1, 6)})
+        self.assertEqual(group["id"], "falco:1")
+
+    def test_summary_does_not_merge_different_identity_or_time_window(self):
+        for pid, when in [(1, "00:00:00"), (2, "00:00:01"), (1, "00:01:00")]:
+            self.insert_event(source="falco", rule="test", payload={"pid": pid}, received_time=f"2026-01-01T{when}+00:00")
+        data = DashboardData(self.config, self.policy)
+        with data._connect() as db:
+            self.assertEqual(len(data._summaries(data._incidents(data._events(db)))), 3)
+
+    def test_same_pid_wrong_path_or_operation_or_old_source_time_never_pairs(self):
+        data = DashboardData(self.config, self.policy)
+        bpf = {"id": 2, "source": "bpf_lsm", "rule": "bpf_lsm:test:audit", "pid": 77,
+               "command": "tee", "policy_name": "protect_test", "operation": "write", "action": "audit",
+               "received_time": "2026-01-01T00:00:30Z", "event_time": "2026-01-01T00:00:01Z"}
+        falco = {"id": 1, "source": "falco", "rule": "Write below etc", "pid": 77,
+                 "process": "tee", "file": "/etc/test", "received_time": bpf["received_time"], "event_time": bpf["event_time"]}
+        for changes in ({"file": "/etc/other"}, {"syscall": "execve"}, {"event_time": "2025-12-01T00:00:01Z"},
+                        {"syscall": "openat", "is_open_write": False}, {"pid": 88}):
+            self.assertEqual(len(data._incidents([bpf, {**falco, **changes}])), 2, changes)
+        # Different ingestion delays cannot prevent pairing close source timestamps.
+        self.assertEqual(len(data._incidents([bpf, {**falco, "received_time": "2026-01-01T00:00:05Z"}])), 1)
+        self.assertEqual(len(data._incidents([bpf, falco, {**falco, "id": 3}])), 3)
+
+    @patch("tsa_dashboard.service_state", return_value="active")
+    def test_pagination_and_server_search_reach_events_beyond_first_page(self, _service):
+        self.insert_event(source="falco", rule="target", payload={"pid": 77, "command": "unique-test"})
+        for n in range(205):
+            self.insert_event(source="falco", rule="noise", payload={"pid": 88})
+        data = DashboardData(self.config, self.policy)
+        first = data.snapshot()
+        self.assertEqual(len(first["incidents"]), 200)
+        self.assertTrue(first["event_window"]["has_more"])
+        second = data.snapshot(before=first["event_window"]["next_before"])
+        self.assertEqual(len(second["incidents"]), 6)
+        self.assertFalse(second["event_window"]["has_more"])
+        self.assertEqual(len(data.snapshot(pid=77)["incidents"]), 1)
+        self.assertEqual(len(data.snapshot(query="unique-test")["incidents"]), 1)
+        self.assertEqual(len(data.snapshot(pid=77, after=1)["incidents"]), 0)
+        self.assertEqual(len(data.snapshot(query="' OR 1=1 --")["incidents"]), 0)
+
+    def test_payload_cannot_override_evidence_identity(self):
+        self.insert_event(source="falco", rule="real", payload={"id": 999, "source": "bpf_lsm", "deducted_points": 999})
+        data = DashboardData(self.config, self.policy)
+        with data._connect() as db:
+            event = data._events(db)[0]
+        self.assertEqual((event["id"], event["source"], event["deducted_points"]), (1, "falco", 0))
 
 
 if __name__ == "__main__":

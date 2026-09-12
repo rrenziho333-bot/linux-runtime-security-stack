@@ -72,6 +72,18 @@ class RiskScorerTests(unittest.TestCase):
         self.assertEqual(result["deducted_points"], 0)
         self.assertEqual(scorer.runtime_score, 100)
 
+    def test_falco_identity_and_syscall_evidence_is_preserved(self):
+        event = falco_event("File write")
+        event["output_fields"].update({"user.uid": 0, "proc.exepath": "/usr/bin/test-process",
+                                       "proc.pname": "sudo", "evt.type": "openat",
+                                       "evt.is_open_write": True, "evt.rawres": 3})
+        result = self.scorer().process_falco_event(event, received_at=100)
+        self.assertEqual(result["uid"], 0)
+        self.assertEqual(result["executable"], "/usr/bin/test-process")
+        self.assertEqual(result["syscall"], "openat")
+        self.assertTrue(result["is_open_write"])
+        self.assertEqual(result["syscall_result"], 3)
+
     def test_restart_uses_active_events_not_legacy_recovery_state(self):
         now = time.time()
         scorer = self.scorer()

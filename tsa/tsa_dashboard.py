@@ -11,13 +11,14 @@ import re
 import sqlite3
 import subprocess
 import time
+from collections import Counter
 from contextlib import closing
 from datetime import datetime, timezone
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 import yaml
 
@@ -48,14 +49,16 @@ section.policies{padding:18px 0;border-bottom:1px solid var(--line)}.policy{padd
 section.events{padding-top:22px}.section-head{align-items:flex-start}.toolbar{justify-content:flex-start;flex-wrap:wrap;margin:16px 0 12px}
 label{display:flex;align-items:center;gap:7px;font-size:13px}input,select{font:inherit;color:inherit;background:var(--paper);border:1px solid #bcc9c1;border-radius:4px;padding:7px 9px;min-height:36px;max-width:100%}
 input{width:260px}select{max-width:270px}input:focus-visible,select:focus-visible,summary:focus-visible{outline:2px solid var(--green);outline-offset:3px}
-.table-head,.event-summary{display:grid;grid-template-columns:minmax(175px,1.2fr) minmax(220px,2.2fr) minmax(110px,1fr) 95px 80px;gap:14px;align-items:center}
+.table-head,.event-summary{display:grid;grid-template-columns:minmax(175px,1.2fr) minmax(220px,2.2fr) minmax(110px,1fr) 95px 130px;gap:14px;align-items:center}
 .table-head{padding:9px 14px;color:var(--muted);font-size:12px;border-bottom:1px solid var(--line)}
 .incident{border-bottom:1px solid var(--line);background:var(--paper)}.event-summary{padding:14px;cursor:pointer;list-style:none}
 .event-summary::-webkit-details-marker{display:none}.event-summary:hover{background:#f1f7f3}.incident[open]>.event-summary{background:#eaf3ed}
 .event-summary>div{min-width:0}.event-title{display:flex;gap:8px;align-items:flex-start;overflow-wrap:anywhere;font-weight:600}
 .event-title:before{content:"▸";flex:none;color:var(--muted)}.incident[open]>.event-summary .event-title:before{content:"▾"}
 .time{display:block;font-size:13px;font-variant-numeric:tabular-nums;white-space:nowrap}.subline{display:block;color:var(--muted);font-size:12px;overflow-wrap:anywhere}
-.source{font-size:12px}.points{text-align:right;font-variant-numeric:tabular-nums;font-weight:600}
+.source{font-size:12px}.points{text-align:right;font-variant-numeric:tabular-nums;font-weight:600}.points .subline{font-weight:400}
+.pages{display:flex;justify-content:space-between;gap:12px;padding:16px 0}.pages button{font:inherit;padding:7px 12px;background:#fff;border:1px solid #bcc9c1;border-radius:4px;cursor:pointer;white-space:nowrap;flex-shrink:0}.pages button:disabled{opacity:.5;cursor:default}
+.toolbar input[type=checkbox]{width:16px;min-height:16px}.toolbar input[type=number]{width:120px}.record-list{max-height:440px;overflow:auto}.detail>div{min-width:0}
 .detail{padding:16px 24px 20px;border-top:1px solid var(--line);display:grid;grid-template-columns:1fr 1fr;gap:18px}
 .detail h3{font-size:14px;margin:0 0 8px}.steps{padding-left:20px;margin:0}.steps li{margin:6px 0;overflow-wrap:anywhere}
 .evidence-row{padding:8px 0;border-bottom:1px solid var(--line);overflow-wrap:anywhere}
@@ -67,10 +70,11 @@ input{width:260px}select{max-width:270px}input:focus-visible,select:focus-visibl
 @media(max-width:700px){main{padding:16px 12px}.top{flex-direction:column;gap:10px}.refresh{text-align:left}h1{font-size:21px}
 .score{padding:0 12px}.score strong{font-size:26px}.components{padding:16px 12px}.services{gap:12px}.section-head{flex-direction:column}
 .toolbar{align-items:stretch}.toolbar label{flex:1 1 100%;justify-content:space-between}input,select{width:75%;max-width:none}
+.toolbar input[type=number]{width:75%}.toolbar .group-label{justify-content:flex-start}
 .table-head{display:none}.event-summary{grid-template-columns:minmax(0,1fr) auto;padding:13px;gap:9px}
-.event-summary .event-main{grid-column:1/-1;grid-row:1}.event-summary .when{grid-column:1;grid-row:2}
-.event-summary .outcome{grid-column:2;grid-row:2}.event-summary .source{grid-column:1;grid-row:3}
-.event-summary .points{grid-column:2;grid-row:3}.detail{grid-template-columns:1fr;padding:14px}.raw{grid-column:1}
+.event-summary .event-main{grid-column:1/-1;grid-row:1}.event-summary .when{grid-column:1/-1;grid-row:2}
+.event-summary .outcome{grid-column:2;grid-row:3}.event-summary .source{grid-column:1;grid-row:3}
+.event-summary .points{grid-column:1/-1;grid-row:4}.detail{grid-template-columns:1fr;padding:14px}.raw{grid-column:1}
 }
 </style>
 </head>
@@ -87,10 +91,15 @@ input{width:260px}select{max-width:270px}input:focus-visible,select:focus-visibl
 <div class="toolbar">
 <label>筛选<select id="filter"><option value="all">全部事件</option><option value="deny">已拦截</option><option value="audit">审计放行</option><option value="falco">仅 Falco 告警</option></select></label>
 <label>搜索<input id="search" type="search" placeholder="规则、进程、路径或事件编号" autocomplete="off"></label>
+<label>PID<input id="pid" type="number" min="1" max="2147483647" placeholder="全部"></label>
+<label>计分<select id="scoring"><option value="all">全部状态</option><option value="scored">有扣分</option><option value="zero">未扣分</option></select></label>
+<label class="group-label"><input id="grouped" type="checkbox" checked>同类汇总</label>
 <label>时区<select id="timezone"><option value="local">浏览器本地时区</option><option value="UTC">UTC</option></select></label>
 </div>
-<div class="table-head" aria-hidden="true"><span>事件 / 采集时间</span><span>事件与进程</span><span>证据来源</span><span>结果</span><span style="text-align:right">当次扣分</span></div>
+<div id="scope" class="muted"></div>
+<div class="table-head" aria-hidden="true"><span>事件 / 采集时间</span><span>事件与进程</span><span>证据来源</span><span>结果</span><span style="text-align:right">历史扣分</span></div>
 <div id="events"></div>
+<div class="pages"><button id="latest" type="button">返回最新</button><span id="page-state" class="muted"></span><button id="older" type="button">更早记录 →</button></div>
 </section>
 </main>
 <script>
@@ -99,9 +108,13 @@ const localZone=Intl.DateTimeFormat().resolvedOptions().timeZone||"UTC";
 const timeKinds={falco_event:"Falco 发生时间",bpf_received:"BPF 控制器收件时间",tsa_received:"TSA 入库时间"};
 const sourceNames={falco:"Falco",bpf_lsm:"BPF LSM"};
 const statusNames={scored:"已计分",duplicate:"去重，不重复扣分",rate_limited:"限速，不扣分",maintenance:"维护，不扣分",maintenance_reclassified:"维护，不扣分",whitelisted:"白名单，不扣分",ignored:"不计分"};
-const ruleNames={"Program run with disallowed http proxy env":"进程使用未允许的代理环境","Write below etc":"写入 /etc 下的文件","Monitor specific file access":"打开演示保护文件"};
+const ruleNames={"Program run with disallowed http proxy env":"进程使用未允许的代理环境","Write below etc":"写入 /etc 下的文件","Monitor specific file access":"打开演示保护文件","Read sensitive file untrusted":"程序读取敏感文件（未列入规则例外）","Non sudo setuid":"非 sudo 程序切换用户身份"};
 const operationNames={write:"写入",unlink:"删除",rename:"重命名",setattr:"修改属性",mmap:"共享可写映射",mprotect:"升级映射写权限"};
-let current=null,eventSignature="",pending=false;
+let current=null,eventSignature="",pending=false,timer=null,before=0;
+const initial=new URLSearchParams(location.search);
+let after=/^\d+$/.test(initial.get("after")||"")?initial.get("after"):"0";
+$("#pid").value=/^\d+$/.test(initial.get("pid")||"")?initial.get("pid"):"";
+$("#search").value=(initial.get("q")||"").slice(0,200);$("#search").maxLength=200;
 const expanded=new Set();
 function el(tag,cls,text){const n=document.createElement(tag);if(cls)n.className=cls;if(text!==undefined)n.textContent=String(text??"");return n}
 function zone(){return $("#timezone").value==="UTC"?"UTC":localZone}
@@ -128,38 +141,51 @@ function renderPolicies(items){const root=$("#policies");root.replaceChildren();
 function groupTitle(x){const b=x.evidence.bpf_lsm;
   if(b)return (operationNames[b.operation]||b.operation||"文件操作")+" · "+(b.policy_name||"保护策略");
   const f=x.evidence.falco;return ruleNames[f.rule]||f.rule||x.title}
+function statusText(x,short=false){const counts=x.status_counts||Object.values(x.evidence).reduce((a,e)=>(a[e.status]=(a[e.status]||0)+1,a),{});
+  const names=short?{scored:"计分",duplicate:"去重未扣分",rate_limited:"限额未扣分",maintenance:"维护",maintenance_reclassified:"维护",whitelisted:"白名单",ignored:"不计分"}:statusNames;
+  return Object.entries(counts).map(([s,n])=>(names[s]||s)+" ×"+n).join("；")}
+function renderEvidence(source,item){
+  const row=el("div","evidence-row");row.append(el("strong","",(sourceNames[source]||source)+" #"+item.id),el("div","",item.rule),
+    el("div","subline",(source==="falco"?"事件发生：":"控制器收件：")+formatTime(item.event_time)),
+    el("div","subline","TSA 入库："+formatTime(item.received_time)),el("div","subline",(statusNames[item.status]||item.status)+" · 历史扣分 "+item.deducted_points));
+  if(item.risk_expires_at&&item.deducted_points>0)row.append(el("div","subline","计分到期："+formatTime(new Date(item.risk_expires_at*1000).toISOString())));
+  if(item.file)row.append(el("div","subline","文件："+item.file));
+  if(item.command)row.append(el("div","subline","命令："+item.command));
+  if(item.executable)row.append(el("div","subline","程序路径："+item.executable));
+  row.append(el("div","subline","PID："+(item.pid||"未采集")+" · 用户："+(item.user||(item.uid??"未知"))));
+  return row;
+}
 function renderEvents(force=false){
   if(!current)return;
-  const items=current.incidents,filter=$("#filter").value,query=$("#search").value.trim().toLowerCase();
-  const signature=JSON.stringify([items,filter,query,zone()]);
+  const items=$("#grouped").checked?current.summaries:current.incidents,filter=$("#filter").value,scoring=$("#scoring").value;
+  const signature=JSON.stringify([items,filter,scoring,zone(),$("#grouped").checked]);
   if(!force&&signature===eventSignature)return;
   eventSignature=signature;
-  const selected=items.filter(x=>(filter==="all"||x.badge_class===filter)&&(!query||[x.id,x.title,groupTitle(x),x.process,x.target,x.pid,...Object.entries(x.evidence).map(([s,e])=>s+":"+e.id+" "+(e.command||""))].join(" ").toLowerCase().includes(query)));
-  $("#event-count").textContent="· "+selected.length+" / "+items.length+" 组";
+  const selected=items.filter(x=>(filter==="all"||x.badge_class===filter)&&(scoring==="all"||(scoring==="scored"?x.deducted_points>0:x.deducted_points===0)));
+  $("#event-count").textContent="· 本页 "+selected.length+" / "+items.length+($("#grouped").checked?" 组":" 项");
   const root=$("#events");root.replaceChildren();
   if(!selected.length){root.append(el("div","empty",items.length?"没有符合条件的事件":"暂无事件"));return}
   selected.forEach(x=>{
     const box=el("details","incident");box.dataset.openKey=x.id;box.open=expanded.has(x.id);
     const head=el("summary","event-summary");const when=el("div","when");const t=el("time","time",formatTime(x.display_time));t.dateTime=x.display_time;t.title=x.display_time;
     when.append(t,el("span","subline",timeKinds[x.time_kind]));
+    if(x.activity_count>1)when.append(el("span","subline","首次："+formatTime(x.first_time)),el("span","subline","末次："+formatTime(x.last_time)));
     const main=el("div","event-main");main.append(el("div","event-title",groupTitle(x)),el("span","subline",(x.process||"进程未知")+" · PID "+(x.pid||"未知")+" · "+x.id));
-    if(x.target)main.append(el("span","subline",x.target));
+    const targets=x.targets||[x.target].filter(Boolean);
+    if(targets.length)main.append(el("span","subline",targets.length===1?targets[0]:targets.length+" 个路径 · "+targets.slice(0,2).join("、")));
+    main.append(el("span","subline",x.activity_count>1?"同类活动 "+x.activity_count+" 项 / "+x.record_count+" 条证据（非同一次操作）":Object.values(x.evidence).map(e=>e.rule).join(" + ")));
     const sources=el("div","source",x.sources.map(s=>sourceNames[s]||s).join(" + "));
-    sources.append(el("span","subline",x.sources.length===2?"关联证据":"单源记录"));
+    sources.append(el("span","subline",x.sources.length===2?"推测关联":"单源记录"));
     const outcome=el("div","outcome");outcome.append(el("span","badge "+x.badge_class,x.decision));
     const points=el("div","points",x.deducted_points?"−"+x.deducted_points:"0");
+    points.append(el("span","subline",statusText(x,true)));
     head.append(when,main,sources,outcome,points);box.append(head);
     const detail=el("div","detail"),chain=el("div");chain.append(el("h3","","处理记录"));
-    const steps=el("ol","steps");x.steps.forEach(s=>steps.append(el("li","",s)));chain.append(steps);
+    const steps=el("ol","steps");(x.activity_count>1?["60 秒内同规则、进程及身份特征的活动汇总；每条证据保留独立编号",statusText(x),"历史扣分合计："+x.deducted_points+"；风险到期与每规则上限会影响当前评分"]:x.steps).forEach(s=>steps.append(el("li","",s)));chain.append(steps);
     const ev=el("div");ev.append(el("h3","","证据与时间"));
-    Object.entries(x.evidence).forEach(([source,item])=>{
-      const row=el("div","evidence-row");row.append(el("strong","",(sourceNames[source]||source)+" #"+item.id),el("div","",item.rule),
-        el("div","subline",(source==="falco"?"事件发生：":"控制器收件：")+formatTime(item.event_time)),
-        el("div","subline","TSA 入库："+formatTime(item.received_time)),
-        el("div","subline",(statusNames[item.status]||item.status)+" · 当次扣分 "+item.deducted_points));
-      if(item.command)row.append(el("div","subline","命令："+item.command));ev.append(row)});
+    const list=el("div","record-list");(x.members||[x]).forEach(m=>Object.entries(m.evidence).forEach(([s,e])=>list.append(renderEvidence(s,e))));ev.append(list);
     const raw=el("details","raw");raw.dataset.openKey=x.id+":raw";raw.open=expanded.has(raw.dataset.openKey);
-    raw.append(el("summary","","入库证据 JSON"),el("pre","",JSON.stringify(x.evidence,null,2)));
+    raw.append(el("summary","","入库证据 JSON"),el("pre","",JSON.stringify((x.members||[x]).map(m=>m.evidence),null,2)));
     detail.append(chain,ev,raw);box.append(detail);root.append(box);
   });
 }
@@ -169,24 +195,37 @@ function render(){
   renderScore(current.scores);renderPipeline(current.pipeline);renderPolicies(current.policies);renderEvents();
   $("#refresh").textContent="页面刷新："+formatTime(current.generated_time);
   $("#zone-label").textContent="显示时区："+zone();
-  $("#window").textContent="最近 "+(current.event_window?.records??"—")+" 条入库记录 · 按入库时间倒序";
+  $("#window").textContent="本页 "+current.event_window.records+" 条证据 · "+current.summaries.length+" 组同类活动 · 非规则数量";
+  $("#scope").textContent=(current.event_window.pid?"限定 PID "+current.event_window.pid+" · ":"")+(after!=="0"?"仅入库编号 > "+after+" · ":"")+"按入库时间倒序；汇总限当前页 60 秒窗口";
+  $("#page-state").textContent=(before?"历史页 · ":"最新页 · ")+(current.event_window.has_more?"还有更早记录":"已到符合条件的最早记录");
+  $("#older").disabled=!current.event_window.has_more;
 }
 $("#timezone").options[0].textContent="本地 · "+localZone;
 $("#timezone").addEventListener("change",()=>{if(current)render();if(document.body.classList.contains("stale"))renderScore({final:null,posture:null,runtime:null})});
 $("#filter").addEventListener("change",()=>renderEvents());
-$("#search").addEventListener("input",()=>renderEvents());
+$("#scoring").addEventListener("change",()=>renderEvents());
+$("#grouped").addEventListener("change",()=>renderEvents());
+function eventUrl(){const p=new URLSearchParams({before:String(before),after,pid:$("#pid").value||"0",q:$("#search").value.trim()});return "/api/status?"+p}
+function requestRefresh(){clearTimeout(timer);document.body.classList.add("stale");$("#connection").textContent="正在查询";timer=setTimeout(refresh,250)}
+$("#search").addEventListener("input",()=>{before=0;requestRefresh()});
+$("#pid").addEventListener("input",()=>{before=0;requestRefresh()});
+$("#older").addEventListener("click",()=>{before=current.event_window.next_before||0;requestRefresh()});
+$("#latest").addEventListener("click",()=>{before=0;after="0";$("#pid").value="";$("#search").value="";requestRefresh()});
 async function refresh(){
   if(pending)return;pending=true;
+  const url=eventUrl();
   try{
-    const r=await fetch("/api/status",{cache:"no-store",signal:AbortSignal.timeout(8000)});
+    const r=await fetch(url,{cache:"no-store",signal:AbortSignal.timeout(8000)});
     if(!r.ok)throw Error("HTTP "+r.status);
-    current=await r.json();render();document.body.classList.remove("stale");$("#error").replaceChildren();
+    const data=await r.json();if(url!==eventUrl())return;
+    current=data;render();document.body.classList.remove("stale");$("#error").replaceChildren();
     $("#connection").textContent=current.availability.ready?"数据正常":"数据未就绪";
     if(!current.availability.ready)$("#error").append(el("div","error",current.availability.reason));
   }catch(e){
+    if(url!==eventUrl())return;
     document.body.classList.add("stale");renderScore({final:null,posture:null,runtime:null});
     $("#connection").textContent="连接异常";$("#error").replaceChildren(el("div","error","数据刷新失败："+e.message));
-  }finally{pending=false;setTimeout(refresh,2000)}
+  }finally{pending=false;clearTimeout(timer);timer=setTimeout(refresh,url===eventUrl()?3000:0)}
 }
 refresh();
 </script></body></html>"""
@@ -247,14 +286,19 @@ class DashboardData:
                 values[row["key"]] = row["value"]
         return values
 
-    def _events(self, db: sqlite3.Connection, limit: int = 80) -> List[Dict[str, Any]]:
+    def _events(self, db: sqlite3.Connection, limit: int = 200, *, before: int = 0,
+                after: int = 0, pid: int = 0, query: str = "") -> List[Dict[str, Any]]:
         rows = db.execute(
             """
             SELECT id, received_time, event_time, source, rule_name, status,
                    deducted_points, payload, risk_expires_at
-            FROM events ORDER BY id DESC LIMIT ?
+            FROM events
+            WHERE (? = 0 OR id < ?) AND id > ?
+              AND (? = 0 OR CAST(json_extract(payload, '$.pid') AS INTEGER) = ?)
+              AND (? = '' OR instr(lower(source || ':' || id || ' ' || rule_name || ' ' || payload), lower(?)) > 0)
+            ORDER BY id DESC LIMIT ?
             """,
-            (limit,),
+            (before, before, after, pid, pid, query, query, limit),
         ).fetchall()
         events = []
         for row in rows:
@@ -262,8 +306,11 @@ class DashboardData:
                 payload = json.loads(row["payload"])
             except json.JSONDecodeError:
                 payload = {"malformed_payload": row["payload"]}
+            if not isinstance(payload, dict):
+                payload = {"malformed_payload": payload}
             events.append(
                 {
+                    **payload,
                     "id": row["id"],
                     "received_time": row["received_time"],
                     "event_time": row["event_time"],
@@ -272,7 +319,6 @@ class DashboardData:
                     "status": row["status"],
                     "deducted_points": row["deducted_points"],
                     "risk_expires_at": row["risk_expires_at"],
-                    **payload,
                 }
             )
         return events
@@ -389,17 +435,30 @@ class DashboardData:
         for event in events:
             if event.get("source") != "bpf_lsm":
                 continue
-            event_ts = parse_time(str(event.get("received_time", "")))
+            event_ts = parse_time(str(event.get("event_time", "")))
             pid = str(event.get("pid", ""))
             match: Optional[Dict[str, Any]] = None
             match_basis = ""
+            matches = []
             for candidate in falco:
                 if candidate["id"] in paired_falco:
                     continue
-                delta = abs(
-                    parse_time(str(candidate.get("received_time", ""))) - event_ts
-                )
-                if delta > 3:
+                candidate_ts = parse_time(str(candidate.get("event_time", "")))
+                if not event_ts or not candidate_ts or abs(candidate_ts - event_ts) > 3:
+                    continue
+                syscall = candidate.get("syscall", "")
+                compatible = {
+                    "write": {"open", "openat", "openat2", "write", "writev", "pwrite", "pwritev"},
+                    "unlink": {"unlink", "unlinkat"}, "rename": {"rename", "renameat", "renameat2"},
+                    "setattr": {"chmod", "fchmod", "fchmodat", "chown", "fchown", "fchownat", "truncate", "ftruncate"},
+                    "mmap": {"mmap"}, "mprotect": {"mprotect"},
+                }
+                if syscall:
+                    if syscall not in compatible.get(event.get("operation"), set()):
+                        continue
+                    if event.get("operation") == "write" and syscall.startswith("open") and candidate.get("is_open_write") is not True:
+                        continue
+                elif not (event.get("operation") == "write" and candidate.get("rule") == "Write below etc"):
                     continue
                 candidate_pid = str(candidate.get("pid", ""))
                 same_pid = bool(pid and candidate_pid and candidate_pid == pid)
@@ -410,15 +469,16 @@ class DashboardData:
                 same_path = str(candidate.get("file", "")) in policy_paths.get(
                     str(event.get("policy_name", "")), set()
                 )
-                if same_pid or (not candidate_pid and same_process and same_path):
-                    match = candidate
-                    match_basis = (
-                        "PID + 时间"
-                        if same_pid
-                        else "进程名 + 保护路径 + 时间"
-                    )
-                    paired_falco.add(candidate["id"])
-                    break
+                if candidate_pid and not same_pid:
+                    continue
+                if candidate.get("uid") is not None and event.get("uid") is not None and str(candidate["uid"]) != str(event["uid"]):
+                    continue
+                if same_path and (same_pid or (not candidate_pid and same_process)):
+                    matches.append((candidate, "PID + 路径 + 操作 + 源时间" if same_pid else "进程名 + 保护路径 + 操作 + 源时间（缺少 PID）"))
+            # A shared PID/path and a short interval are not a unique syscall ID.
+            if len(matches) == 1:
+                match, match_basis = matches[0]
+                paired_falco.add(match["id"])
 
             action = str(event.get("action", "unknown")).lower()
             operation = str(event.get("operation", "unknown"))
@@ -427,10 +487,10 @@ class DashboardData:
             steps = [f"进程 {command} 请求执行 {operation}"]
             if match:
                 steps.append(
-                    f"Falco 匹配规则：{match.get('rule')}（关联依据：{match_basis}）"
+                    f"疑似关联 Falco：{match.get('rule')}（{match_basis}；非唯一操作标识）"
                 )
             else:
-                steps.append("未关联到 3 秒窗口内同一操作的 Falco 报警")
+                steps.append("没有可唯一配对的 Falco 候选；不代表未检测或操作安全")
             steps.append(f"BPF LSM 命中策略：{policy}")
             if action == "deny":
                 decision = "已拦截"
@@ -439,7 +499,7 @@ class DashboardData:
             elif action == "audit":
                 decision = "审计放行"
                 badge = "audit"
-                steps.append("BPF LSM 记录 AUDIT：操作继续执行")
+                steps.append("BPF LSM 审计放行；最终写入是否成功需核对测试命令结果")
             else:
                 decision = action
                 badge = "audit"
@@ -448,6 +508,8 @@ class DashboardData:
             evidence = {"bpf_lsm": event}
             if match:
                 evidence["falco"] = match
+                steps.append(self._tsa_step(match) + "（Falco 独立计分）")
+                steps.append("汇总为两路历史扣分之和；不等于一次攻击或当前总分变化")
             incidents.append(
                 {
                     "time": event.get("received_time", ""),
@@ -457,7 +519,8 @@ class DashboardData:
                     "badge_class": badge,
                     "steps": steps,
                     "evidence": evidence,
-                    "_timestamp": event_ts,
+                    "_timestamp": parse_time(str(event.get("received_time", ""))),
+                    "correlation": "heuristic" if match else "none",
                 }
             )
 
@@ -501,7 +564,41 @@ class DashboardData:
                 "sources": list(evidence),
                 "deducted_points": sum(int(item.get("deducted_points", 0)) for item in evidence.values()),
             })
-        return incidents[:30]
+        return incidents
+
+    @staticmethod
+    def _summaries(incidents: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Collapse similar activity for display only; retain every evidence row."""
+        groups: List[Dict[str, Any]] = []
+        latest: Dict[str, Dict[str, Any]] = {}
+        for incident in reversed(incidents):
+            identity = []
+            for source, event in sorted(incident["evidence"].items()):
+                fields = ("rule", "pid", "process", "command", "user", "uid", "container_id", "executable",
+                          "policy_id", "operation", "action", "device", "inode")
+                identity.append([source, *[event.get(k, "") for k in fields]])
+            key = json.dumps(identity, ensure_ascii=False, sort_keys=True)
+            ts = parse_time(str(incident["received_time"]))
+            group = latest.get(key)
+            if group is None or not ts or not 0 <= ts - group["started"] < 60:
+                group = {"id": incident["id"], "started": ts, "members": []}
+                groups.append(group)
+                latest[key] = group
+            group["members"].insert(0, incident)
+        result = []
+        for group in reversed(groups):
+            members = group["members"]
+            records = [e for item in members for e in item["evidence"].values()]
+            result.append({
+                **members[0], "id": group["id"], "members": members,
+                "record_count": len(records), "activity_count": len(members),
+                "first_time": min((x["display_time"] for x in members), key=parse_time),
+                "last_time": max((x["display_time"] for x in members), key=parse_time),
+                "targets": sorted({x["target"] for x in members if x["target"]}),
+                "status_counts": dict(Counter(str(e["status"]) for e in records)),
+                "deducted_points": sum(int(e["deducted_points"]) for e in records),
+            })
+        return sorted(result, key=lambda x: parse_time(x["received_time"]), reverse=True)
 
     def scores(self) -> Dict[str, Optional[float]]:
         """Return only the current risk scores (lighter than snapshot())."""
@@ -512,10 +609,12 @@ class DashboardData:
                 raise ValueError(availability["reason"])
             return self._scores(db, state)
 
-    def snapshot(self) -> Dict[str, Any]:
+    def snapshot(self, *, before: int = 0, after: int = 0, pid: int = 0, query: str = "") -> Dict[str, Any]:
         with closing(self._connect()) as db:
             state = self._state(db)
-            events = self._events(db)
+            events = self._events(db, limit=201, before=before, after=after, pid=pid, query=query)
+            has_more = len(events) > 200
+            events = events[:200]
             scores = self._scores(db, state)
         availability = self._availability(state)
         if not availability["ready"]:
@@ -540,7 +639,7 @@ class DashboardData:
                 "name": "BPF LSM",
                 "active": states["bpf"] == "active",
                 "status": states["bpf"],
-                "detail": "内核决策：" + "/".join(modes),
+                "detail": "策略文件：" + "/".join(modes),
             },
             {
                 "name": "TSA",
@@ -555,14 +654,18 @@ class DashboardData:
                 "detail": "只读显示，不修改策略",
             },
         ]
+        incidents = self._incidents(events)
         return {
             "generated_time": utc_now(),
             "scores": scores,
             "availability": availability,
             "pipeline": pipeline,
             "policies": policies,
-            "incidents": self._incidents(events),
-            "event_window": {"records": len(events), "limit": 80},
+            "incidents": incidents,
+            "summaries": self._summaries(incidents),
+            "event_window": {"records": len(events), "limit": 200, "has_more": has_more,
+                             "next_before": events[-1]["id"] if has_more else None,
+                             "after": after, "pid": pid, "query": query},
         }
 
 
@@ -611,7 +714,16 @@ class DashboardHandler(BaseHTTPRequestHandler):
             return
         if path == "/api/status":
             try:
-                snapshot = self.server.data.snapshot()  # type: ignore[attr-defined]
+                params = parse_qs(urlparse(self.path).query)
+                filters = {k: int(params.get(k, ["0"])[0]) for k in ("before", "after", "pid")}
+                query = params.get("q", [""])[0]
+                if any(v < 0 or v > 2**63 - 1 for v in filters.values()) or len(query) > 200:
+                    raise ValueError("invalid event filter")
+            except ValueError:
+                self._send(b'{"error":"invalid event filter"}', "application/json", HTTPStatus.BAD_REQUEST)
+                return
+            try:
+                snapshot = self.server.data.snapshot(**filters, query=query)  # type: ignore[attr-defined]
                 body = json.dumps(snapshot, ensure_ascii=False).encode("utf-8")
                 self._send(body, "application/json; charset=utf-8")
             except (OSError, sqlite3.Error, ValueError) as error:

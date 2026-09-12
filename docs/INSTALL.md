@@ -259,50 +259,51 @@ systemctl is-active falco-modern-bpf bpf-lsm-controller tsa-fusion tsa-dashboard
 curl --fail http://127.0.0.1:8766/healthz
 ```
 
-**命令 4.3：写入演示文件，触发事件。**
+**命令 4.3：验证一次演示文件写入，输出本次 PID、规则和证据链接。**
 ```bash
-echo verify | sudo tee -a /etc/tsa-protected-demo >/dev/null
+python3 tsa/verify_runtime.py
 ```
 
-**命令 4.4：等待事件处理。**
-```bash
-sleep 3
-```
+看到 `PASS` 后打开输出的链接，只查看本次测试；`FAIL` 时按提示排查。测试只向已有演示文件追加一行编号，不修改策略。
 
-**命令 4.5：查看 Falco 告警。**
+**命令 4.4（排障可选）：查看 Falco 原始告警，可能包含其他进程的活动。**
 ```bash
 sudo tail -n 10 /var/log/falco/falco.json
 ```
 
-**命令 4.6：查看 BPF 事件。**
+**命令 4.5（排障可选）：查看 BPF 原始事件。**
 ```bash
 sudo tail -n 10 /var/log/bpf-lsm/events.jsonl
 ```
 
-**命令 4.7：读取风险评分。**
+**命令 4.6：读取风险评分。**
 ```bash
 curl --fail http://127.0.0.1:8766/systemManage/risk/score
 ```
 
 **成功判据**：四行 `active`；健康为 `{"status":"ok"}`；Falco 有演示文件告警，BPF 有 `action:audit`；评分接口 HTTP 200 且 `data` 非空。在 Ubuntu 浏览器打开 `http://127.0.0.1:8766/` 看事件；此地址不是 Windows 宿主机的地址。规则名可能是官方 `Write below etc`，不要求一定命中项目规则名。
 
-**命令 4.8（可选，在自己的电脑执行）：通过已有、经过认证的 SSH 连接转发看板。**
+**命令 4.7（可选，在自己的电脑执行）：通过已有、经过认证的 SSH 连接转发看板。**
 
 先替换命令中的用户名和 Ubuntu 地址；连接期间保留此终端，再在自己的电脑浏览器访问 `http://127.0.0.1:18766/`。不要为此把看板开放到 `0.0.0.0`。
 ```bash
 ssh -N -L 127.0.0.1:18766:127.0.0.1:8766 用户名@Ubuntu地址
 ```
 
-**阻断验收（可选，已实测）**：在 Ubuntu 的项目目录中，仅将 `policy.yaml` 中 `id: 1001` 的 `mode` 改成 `enforce`，再执行 4.9。只测试演示文件，不要直接对系统关键文件启用阻断。
+**阻断验收（可选，已实测）**：在 Ubuntu 的项目目录中，仅将 `policy.yaml` 中 `id: 1001` 的 `mode` 改成 `enforce`，再执行 4.8。只测试演示文件，不要直接对系统关键文件启用阻断。
 
-**命令 4.9（可选）：重新部署修改后的策略。**
+**命令 4.8（可选）：重新部署修改后的策略。**
 ```bash
 sudo GO_BIN="$HOME/.local/lib/lrss-go1.26.8/go/bin/go" ./deploy-security-stack.sh
 ```
 
-等待约 10 秒，再运行命令 4.3。预期写入失败（`Operation not permitted` / `EPERM`），命令 4.6 的 BPF 日志有 `action:deny`、`result:-1`，看板显示“已拦截”。**完成后将 `mode` 改回 `audit`，再次执行 4.9，恢复默认模式。**
+等待约 10 秒，再执行：
+```bash
+python3 tsa/verify_runtime.py --expect deny
+```
+预期实际写入被 `EPERM` 拒绝、BPF 有 `action:deny` 与 `result:-1`，验证输出 `PASS`。**完成后将 `mode` 改回 `audit`，再次执行 4.8，恢复默认模式。**
 
-**命令 4.10（可选）：服务失败或接口 503 时查看日志。**
+**命令 4.9（可选）：服务失败或接口 503 时查看日志。**
 ```bash
 journalctl -u falco-modern-bpf -u bpf-lsm-controller -u tsa-fusion -u tsa-dashboard -n 80 --no-pager
 ```
@@ -316,6 +317,7 @@ journalctl -u falco-modern-bpf -u bpf-lsm-controller -u tsa-fusion -u tsa-dashbo
 - 实际加载：`/etc/falco/falco.yaml` 指向 `/etc/falco/security-stack/rules/<规则包ID>/`；详细示例见 [FALCO_RULES.md](FALCO_RULES.md)。
 - 风险分配置：`tsa/policy_config.yaml`；修改后执行 5.3。默认总分为 `0.4 * posture + 0.6 * runtime`，分数越低风险越高，不是安全认证。
 - 日志与数据：Falco `/var/log/falco/falco.json`，BPF `/var/log/bpf-lsm/events.jsonl`，SQLite `tsa/state/tsa.db`，最新评分报告 `tsa/reports/last_scan.json`。
+- 看板按 60 秒汇总同类活动，原始证据不删除；零分标明去重或限额。历史扣分不等于当前风险，Falco 与 BPF 仍独立计分；“推测关联”不是唯一操作证明。搜索或 PID 查询后可翻阅更早记录。
 - Lynis 基线默认一天后过期；重新执行命令 3.12 至 3.14，再执行 5.3。TSA 默认只读取报告，不会自动执行 Lynis。
 
 以下为日常维护命令，不是首次安装的必做步骤；在 Ubuntu 的项目目录中执行。
