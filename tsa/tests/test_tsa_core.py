@@ -93,9 +93,6 @@ class RiskScorerTests(unittest.TestCase):
 
         restored = self.scorer()
         self.assertEqual(restored.runtime_score, 95)
-        restored.process_bpf_lsm_event(
-            {"policy_id": 1001, "action": "deny", "pid": 123}, received_at=now
-        )
         restored.process_falco_event(falco_event("Another risk"), received_at=now)
         self.assertEqual(self.store.get("last_attack_time"), "obsolete state")
         self.assertEqual(self.store.get("last_recovery_time"), "obsolete state")
@@ -169,39 +166,6 @@ class RiskScorerTests(unittest.TestCase):
         )
         self.assertEqual(scorer.final_score(), 65)
 
-    def test_bpf_lsm_events_are_scored_and_deduplicated(self):
-        scorer = RiskScorer(
-            {
-                "bpf_lsm": {
-                    "action_points": {"audit": 2, "deny": 8},
-                    "policy_points": {1001: {"deny": 10}},
-                    "event_control": {
-                        "dedup_window": 10,
-                        "max_points_per_minute": 30,
-                    },
-                },
-            },
-            self.store,
-        )
-        event = {
-            "received_time": "2026-01-01T00:00:00Z",
-            "source": "bpf_lsm",
-            "policy_id": 1001,
-            "policy_name": "protect_tmp_rzh",
-            "action": "deny",
-            "operation": "write",
-            "result": -1,
-            "pid": 123,
-            "uid": 1000,
-            "device": 8,
-            "inode": 99,
-            "command": "writer",
-        }
-        first = scorer.process_bpf_lsm_event(event, received_at=100)
-        second = scorer.process_bpf_lsm_event(event, received_at=105)
-        self.assertEqual(first["deducted_points"], 10)
-        self.assertEqual(second["status"], "duplicate")
-        self.assertEqual(scorer.runtime_score, 90)
 
     def test_runtime_score_recovers_when_event_risk_expires(self):
         scorer = self.scorer(
@@ -260,13 +224,11 @@ class LynisParserTests(unittest.TestCase):
 
 
 class TSAIntegrationTests(unittest.TestCase):
-    def test_state_and_report_survive_restart_for_both_event_sources(self):
+    def test_state_and_report_survive_restart_for_falco(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             falco_log = root / "falco.json"
-            bpf_log = root / "bpf.jsonl"
             falco_log.touch()
-            bpf_log.touch()
             config = root / "policy.yaml"
             config.write_text(
                 f"""
@@ -289,12 +251,6 @@ runtime_rules:
   specific_rules:
     Test Falco Rule: 5
   priority_mapping: {{WARNING: 5}}
-bpf_lsm:
-  enabled: true
-  log_path: {bpf_log}
-  start_at_end: false
-  action_points: {{audit: 2, deny: 8}}
-  event_control: {{dedup_window: 10, max_points_per_minute: 30}}
 """,
                 encoding="utf-8",
             )
@@ -305,25 +261,8 @@ bpf_lsm:
                 falco_result = agent.process_line(
                     json.dumps(falco_event("Test Falco Rule"))
                 )
-                bpf_result = agent.process_bpf_lsm_line(
-                    json.dumps(
-                        {
-                            "received_time": "2026-01-01T00:00:00Z",
-                            "source": "bpf_lsm",
-                            "policy_id": 1,
-                            "policy_name": "test",
-                            "action": "deny",
-                            "operation": "write",
-                            "pid": 7,
-                            "uid": 1000,
-                            "device": 8,
-                            "inode": 9,
-                        }
-                    )
-                )
                 self.assertEqual(falco_result["deducted_points"], 5)
-                self.assertEqual(bpf_result["deducted_points"], 8)
-                self.assertEqual(agent.scorer.runtime_score, 87)
+                self.assertEqual(agent.scorer.runtime_score, 95)
                 agent.generate_report("test")
             finally:
                 agent.close()
@@ -331,15 +270,15 @@ bpf_lsm:
             report = json.loads(
                 (root / "reports" / "report.json").read_text(encoding="utf-8")
             )
-            self.assertEqual(report["scores"]["runtime"], 87)
+            self.assertEqual(report["scores"]["runtime"], 95)
             self.assertEqual(
                 {item["source"] for item in report["recent_security_events"]},
-                {"falco", "bpf_lsm"},
+                {"falco"},
             )
 
             restarted = TSAFusionAgent(str(config))
             try:
-                self.assertEqual(restarted.scorer.runtime_score, 87)
+                self.assertEqual(restarted.scorer.runtime_score, 95)
             finally:
                 restarted.close()
 

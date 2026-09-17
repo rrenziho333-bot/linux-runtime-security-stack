@@ -233,7 +233,7 @@ class StateStore:
             """
             SELECT rule_name, SUM(deducted_points) AS points
             FROM events
-            WHERE status = 'scored'
+            WHERE source = 'falco' AND status = 'scored'
               AND deducted_points > 0
               AND risk_expires_at IS NOT NULL
               AND risk_expires_at > ?
@@ -256,7 +256,7 @@ class StateStore:
             """
             SELECT received_time, event_time, source, rule_name, status,
                    deducted_points, payload, risk_expires_at
-            FROM events ORDER BY id DESC LIMIT ?
+            FROM events WHERE source = 'falco' ORDER BY id DESC LIMIT ?
             """,
             (limit,),
         ).fetchall()
@@ -526,116 +526,7 @@ class RiskScorer:
         record["runtime_score"] = self.runtime_score
         return {**record, "status": status, "deducted_points": admitted}
 
-    def process_bpf_lsm_event(
-        self,
-        event: Mapping[str, Any],
-        received_at: Optional[float] = None,
-        suppress_scoring: bool = False,
-    ) -> Optional[Dict[str, Any]]:
-        with self.store.transaction():
-            return self._process_bpf_lsm_event(event, received_at, suppress_scoring)
 
-    def _process_bpf_lsm_event(
-        self,
-        event: Mapping[str, Any],
-        received_at: Optional[float] = None,
-        suppress_scoring: bool = False,
-    ) -> Optional[Dict[str, Any]]:
-        if not isinstance(event, Mapping) or event.get("source") != "bpf_lsm":
-            return None
-
-        for field in ("policy_id", "pid", "uid", "device", "inode"):
-            value = event.get(field, 0)
-            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
-                LOG.warning("Ignoring BPF event with invalid %s", field)
-                return None
-
-        now = time.time() if received_at is None else received_at
-        received_time = datetime.fromtimestamp(now, timezone.utc).isoformat()
-        action = str(event.get("action", "unknown")).lower()
-        policy_id = int(event.get("policy_id", 0))
-        policy_name = str(event.get("policy_name", "") or policy_id)
-        bpf_cfg = self.config.get("bpf_lsm", {}) or {}
-        action_points = bpf_cfg.get("action_points", {}) or {}
-        per_policy = bpf_cfg.get("policy_points", {}) or {}
-        policy_override = per_policy.get(policy_id, per_policy.get(str(policy_id), {}))
-        if isinstance(policy_override, Mapping) and action in policy_override:
-            requested_points = max(0, int(policy_override[action]))
-            reason = f"BPF LSM policy override [{policy_name}]"
-        else:
-            requested_points = max(0, int(action_points.get(action, 0)))
-            reason = f"BPF LSM action [{action}]"
-
-        controls = bpf_cfg.get("event_control", {}) or {}
-        dedup_window = max(0, int(controls.get("dedup_window", 10)))
-        max_per_minute = max(
-            0, int(controls.get("max_points_per_minute", 30))
-        )
-        action_ttl = bpf_cfg.get("risk_ttl_by_action", {}) or {}
-        risk_ttl = max(
-            1,
-            int(
-                action_ttl.get(
-                    action,
-                    controls.get("risk_ttl_seconds", 3600),
-                )
-            ),
-        )
-        identity = {
-            "source": "bpf_lsm",
-            "policy_id": policy_id,
-            "action": action,
-            "operation": event.get("operation", "unknown"),
-            "pid": event.get("pid", 0),
-            "uid": event.get("uid", 0),
-            "device": event.get("device", 0),
-            "inode": event.get("inode", 0),
-        }
-        canonical = json.dumps(identity, sort_keys=True, ensure_ascii=False)
-        event_key = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
-        rule_name = f"bpf_lsm:{policy_name}:{action}"
-        if suppress_scoring:
-            admitted, status, count = 0, "maintenance", 1
-            reason = "maintenance window"
-        else:
-            admitted, status, count = self.store.admit_points(
-                event_key=event_key,
-                rule_name=rule_name,
-                now=now,
-                requested_points=requested_points,
-                dedup_window=dedup_window,
-                max_points_per_minute=max_per_minute,
-            )
-        record = {
-            "policy_id": policy_id,
-            "policy_name": policy_name,
-            "action": action,
-            "operation": event.get("operation", "unknown"),
-            "result": event.get("result", 0),
-            "reason": reason,
-            "occurrence_count": count,
-            "pid": event.get("pid", 0),
-            "tgid": event.get("tgid", 0),
-            "uid": event.get("uid", 0),
-            "gid": event.get("gid", 0),
-            "command": event.get("command", ""),
-            "device": event.get("device", 0),
-            "inode": event.get("inode", 0),
-        }
-        self.store.record_event(
-            received_time=received_time,
-            event_time=str(event.get("received_time", "")),
-            source="bpf_lsm",
-            rule_name=rule_name,
-            status=status,
-            deducted_points=admitted,
-            event_key=event_key,
-            payload=record,
-            risk_expires_at=now + risk_ttl if admitted > 0 else None,
-        )
-        self.refresh_runtime_score(now)
-        record["runtime_score"] = self.runtime_score
-        return {**record, "status": status, "deducted_points": admitted}
 
     def refresh_runtime_score(self, now: Optional[float] = None) -> float:
         current = time.time() if now is None else now
@@ -809,15 +700,13 @@ def parse_lynis_report(
 
 
 class TSAFusionAgent:
-    def __init__(self, config_path: str, *, bpf_lsm_enabled: Optional[bool] = None):
+    def __init__(self, config_path: str):
         self.config_path = Path(config_path).expanduser().resolve()
         self.config_dir = self.config_path.parent
         with self.config_path.open("r", encoding="utf-8") as config_file:
             self.config = yaml.safe_load(config_file) or {}
         if not isinstance(self.config, Mapping):
             raise ValueError("TSA configuration root must be a mapping")
-        if bpf_lsm_enabled is not None:
-            self.config.setdefault("bpf_lsm", {})["enabled"] = bpf_lsm_enabled
 
         storage = self.config.get("storage", {}) or {}
         state_db = _resolve_path(
@@ -854,29 +743,8 @@ class TSAFusionAgent:
                 ),
             )
         ] if runtime_cfg.get("enabled", True) else []
-        bpf_cfg = self.config.get("bpf_lsm", {}) or {}
-        self.bpf_lsm_log_path: Optional[Path] = None
-        if bpf_cfg.get("enabled", False):
-            self.bpf_lsm_log_path = _resolve_path(
-                self.config_dir,
-                str(bpf_cfg.get("log_path", "/var/log/bpf-lsm/events.jsonl")),
-            )
-
-            self.readers.append(
-                (
-                    "bpf_lsm",
-                    RotatingLineReader(
-                        self.bpf_lsm_log_path,
-                        self.store,
-                        start_at_end=bool(bpf_cfg.get("start_at_end", True)),
-                        state_prefix="bpf_lsm_log",
-                    ),
-                )
-            )
-
         self.store.set("enabled_sources", {
             "runtime_rules": runtime_cfg.get("enabled", True),
-            "bpf_lsm": bpf_cfg.get("enabled", False),
         })
 
     def close(self) -> None:
@@ -890,9 +758,9 @@ class TSAFusionAgent:
     def run_posture_scan(self) -> Optional[float]:
         baseline = self.config.get("baseline_lynis", {}) or {}
         if not baseline.get("enabled", False):
-            self.scorer.set_posture_score(100)
+            self.scorer.set_posture_score(None)
             self.store.set("baseline_status", "disabled")
-            return 100
+            return None
 
         try:
             return self._run_posture_scan(baseline)
@@ -991,26 +859,6 @@ class TSAFusionAgent:
             )
         return result
 
-    def process_bpf_lsm_line(self, line: str) -> Optional[Dict[str, Any]]:
-        try:
-            event = json.loads(line)
-        except (ValueError, RecursionError):
-            LOG.warning("Ignoring malformed BPF LSM JSON line")
-            return None
-        result = self.scorer.process_bpf_lsm_event(
-            event,
-            suppress_scoring=self.maintenance_file.exists(),
-        )
-        if result and result["deducted_points"]:
-            LOG.warning(
-                "BPF LSM policy=%s action=%s status=%s points=-%s runtime=%.2f",
-                result["policy_name"],
-                result["action"],
-                result["status"],
-                result["deducted_points"],
-                self.scorer.runtime_score,
-            )
-        return result
 
     def generate_report(self, status: str = "running") -> None:
         report = {
@@ -1019,9 +867,6 @@ class TSAFusionAgent:
             "baseline_status": self.store.get("baseline_status", "unavailable"),
             "sources": {
                 "falco_log_path": str(self.falco_log_path),
-                "bpf_lsm_log_path": (
-                    str(self.bpf_lsm_log_path) if self.bpf_lsm_log_path else None
-                ),
                 "lynis_report_path": str(
                     (self.config.get("baseline_lynis", {}) or {}).get("report_path", "")
                 ),
@@ -1086,10 +931,7 @@ class TSAFusionAgent:
                     continue
                 processed = True
                 with self.store.transaction():
-                    if source == "falco":
-                        self.process_line(line)
-                    else:
-                        self.process_bpf_lsm_line(line)
+                    self.process_line(line)
                     reader.acknowledge()
             if processed:
                 continue

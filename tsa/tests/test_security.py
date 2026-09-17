@@ -29,7 +29,6 @@ class SecurityTests(unittest.TestCase):
             "baseline_lynis": {"enabled": True, "report_path": "lynis.dat"},
             "runtime_rules": {"enabled": True, "log_path": "falco.json",
                               "start_at_end": False, "specific_rules": {"test": 5}},
-            "bpf_lsm": {"enabled": False, "log_path": "bpf.jsonl"},
         }
         self.write_config()
         self.event = {"rule": "test", "priority": "WARNING", "output_fields": {"proc.pid": 42}}
@@ -47,7 +46,7 @@ class SecurityTests(unittest.TestCase):
         store.set("baseline_status", "ok")
         store.set("fusion_status", "running")
         store.set("fusion_heartbeat", time.time())
-        store.set("source_status", {"falco": True, "bpf_lsm": True})
+        store.set("source_status", {"falco": True})
 
     def test_scoring_transaction_rolls_back_dedup_after_insert_failure(self):
         agent = self.agent()
@@ -148,20 +147,41 @@ class SecurityTests(unittest.TestCase):
         with patch("tsa_core.subprocess.run", side_effect=TimeoutError("scan timed out")):
             self.assertIsNone(agent.run_posture_scan())
 
-    def test_bpf_mode_override_does_not_mutate_config(self):
-        original = self.config_path.read_bytes()
-        agent = self.agent(bpf_lsm_enabled=True)
-        self.assertEqual([name for name, _ in agent.readers], ["falco", "bpf_lsm"])
-        self.assertEqual(self.config_path.read_bytes(), original)
 
     def test_runtime_disabled_is_respected(self):
         self.config["runtime_rules"]["enabled"] = False
         self.write_config()
         self.assertEqual(self.agent().readers, [])
 
+    @patch("tsa_dashboard.service_state", return_value="active")
+    def test_disabled_baseline_is_not_a_perfect_score(self, _service):
+        self.config["baseline_lynis"]["enabled"] = False
+        self.write_config()
+        agent = self.agent()
+        self.mark_ready(agent.store)
+        self.assertIsNone(agent.run_posture_scan())
+        self.assertIsNone(agent.scorer.posture_score)
+        with self.assertRaisesRegex(ValueError, "baseline"):
+            DashboardData(self.config_path).scores()
+
+    @patch("tsa_dashboard.service_state", return_value="active")
+    def test_disabled_monitoring_is_not_a_healthy_score(self, _service):
+        self.config["runtime_rules"]["enabled"] = False
+        self.write_config()
+        agent = self.agent()
+        self.mark_ready(agent.store)
+        with self.assertRaisesRegex(ValueError, "disabled"):
+            DashboardData(self.config_path).scores()
+
+    def test_legacy_config_cannot_reenable_enforcement_collection(self):
+        self.config["bpf_lsm"] = {"enabled": True, "log_path": "legacy.jsonl"}
+        self.write_config()
+        agent = self.agent()
+        self.assertEqual([source for source, _ in agent.readers], ["falco"])
+        self.assertEqual(agent.store.get("enabled_sources"), {"runtime_rules": True})
+
     def test_malformed_event_types_do_not_crash(self):
         agent = self.agent()
-        self.assertIsNone(agent.process_bpf_lsm_line('{"source":"bpf_lsm","policy_id":[]}'))
         self.event["tags"] = [{"unhashable": True}]
         self.assertEqual(agent.process_line(json.dumps(self.event))["deducted_points"], 5)
         self.assertIsNone(agent.process_line("[" * 2000 + "]" * 2000))
@@ -203,7 +223,7 @@ class SecurityTests(unittest.TestCase):
     def test_stale_or_stopped_fusion_rejects_score(self, _service):
         agent = self.agent()
         self.mark_ready(agent.store)
-        data = DashboardData(self.config_path, self.root / "bpf.yaml")
+        data = DashboardData(self.config_path)
         self.assertEqual(data.scores()["final"], 92)
         for status, heartbeat in (("running", time.time() - 60), ("stopped", time.time())):
             agent.store.set("fusion_status", status)
@@ -217,7 +237,7 @@ class SecurityTests(unittest.TestCase):
         agent = self.agent()
         self.mark_ready(agent.store)
         with self.assertRaises(ValueError):
-            DashboardData(self.config_path, self.root / "bpf.yaml").scores()
+            DashboardData(self.config_path).scores()
 
     @patch("tsa_dashboard.service_state", return_value="active")
     def test_missing_log_rejects_score_even_with_active_services(self, _service):
@@ -225,7 +245,7 @@ class SecurityTests(unittest.TestCase):
         self.mark_ready(agent.store)
         agent.store.set("source_status", {"falco": False})
         with self.assertRaisesRegex(ValueError, "event log is unavailable"):
-            DashboardData(self.config_path, self.root / "bpf.yaml").scores()
+            DashboardData(self.config_path).scores()
 
     @patch("tsa_dashboard.service_state", return_value="active")
     def test_missing_baseline_still_displays_valid_runtime(self, _service):
@@ -233,7 +253,7 @@ class SecurityTests(unittest.TestCase):
         self.mark_ready(agent.store)
         agent.scorer.set_posture_score(None)
         agent.store.set("baseline_status", "unavailable")
-        data = DashboardData(self.config_path, self.root / "bpf.yaml")
+        data = DashboardData(self.config_path)
         self.assertEqual(data.snapshot()["scores"], {"posture": None, "final": None, "runtime": 100})
         with self.assertRaises(ValueError):
             data.scores()
@@ -241,7 +261,7 @@ class SecurityTests(unittest.TestCase):
     @contextmanager
     def http_server(self):
         server = DashboardServer(("127.0.0.1", 0), DashboardHandler)
-        server.data = DashboardData(self.config_path, self.root / "bpf.yaml")
+        server.data = DashboardData(self.config_path)
         worker = threading.Thread(target=server.serve_forever, daemon=True)
         worker.start()
         try:

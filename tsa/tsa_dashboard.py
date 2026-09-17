@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Read-only local dashboard for the TSA/Falco/BPF LSM security pipeline."""
+"""Read-only local dashboard for the TSA/Falco/Lynis security pipeline."""
 
 from __future__ import annotations
 
@@ -34,7 +34,7 @@ HTML = r"""<!doctype html>
 --green:#147257;--red:#b52c3e;--amber:#88610c;--blue:#276b91}
 *{box-sizing:border-box;letter-spacing:0}body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif}
 main{max-width:1440px;margin:auto;padding:24px 28px}h1{font-size:24px;margin:0}h2{font-size:17px;margin:0}p{margin:0}
-.top,.section-head,.toolbar,.service,.policy-line{display:flex;align-items:center;justify-content:space-between;gap:12px}
+.top,.section-head,.toolbar,.service{display:flex;align-items:center;justify-content:space-between;gap:12px}
 .top{padding-bottom:20px;border-bottom:1px solid var(--line);align-items:flex-start}.muted,small{color:var(--muted)}
 .refresh{text-align:right;font-size:12px;font-variant-numeric:tabular-nums}.refresh strong{display:block;color:var(--green)}
 .overview{display:grid;grid-template-columns:1fr 1.4fr;border-bottom:1px solid var(--line);background:var(--paper)}
@@ -43,9 +43,8 @@ main{max-width:1440px;margin:auto;padding:24px 28px}h1{font-size:24px;margin:0}h
 .score:first-child strong{color:var(--green)}.score small{font-size:11px}.score strong.unknown{font-size:20px}
 .components{padding:20px 24px}.services{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px 24px;margin-top:12px}
 .service{min-width:0}.service small{display:block}.state{white-space:nowrap;font-size:12px;color:var(--green)}.state.bad{color:var(--red)}
-section.policies{padding:18px 0;border-bottom:1px solid var(--line)}.policy{padding-top:12px}.policy-line{justify-content:flex-start;flex-wrap:wrap}
-.policy-path{overflow-wrap:anywhere}.badge{font-size:12px;padding:2px 6px;white-space:nowrap;border-radius:3px;display:inline-block}
-.audit{color:var(--amber);background:#fff3d5}.deny{color:var(--red);background:#fce8eb}.falco{color:var(--blue);background:#e9f3f9}
+.badge{font-size:12px;padding:2px 6px;white-space:nowrap;border-radius:3px;display:inline-block}
+.falco{color:var(--blue);background:#e9f3f9}
 section.events{padding-top:22px}.section-head{align-items:flex-start}.toolbar{justify-content:flex-start;flex-wrap:wrap;margin:16px 0 12px}
 label{display:flex;align-items:center;gap:7px;font-size:13px}input,select{font:inherit;color:inherit;background:var(--paper);border:1px solid #bcc9c1;border-radius:4px;padding:7px 9px;min-height:36px;max-width:100%}
 input{width:260px}select{max-width:270px}input:focus-visible,select:focus-visible,summary:focus-visible{outline:2px solid var(--green);outline-offset:3px}
@@ -64,7 +63,7 @@ input{width:260px}select{max-width:270px}input:focus-visible,select:focus-visibl
 .evidence-row{padding:8px 0;border-bottom:1px solid var(--line);overflow-wrap:anywhere}
 .raw{grid-column:1/-1}.raw summary{cursor:pointer;color:var(--muted);font-size:13px}pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#f4f6f5;max-height:300px;overflow:auto;padding:12px;font-size:12px}
 .error{background:#fce8eb;border-left:3px solid var(--red);padding:12px;margin:12px 0;overflow-wrap:anywhere}
-.empty{padding:30px 14px;color:var(--muted);background:var(--paper)}.stale #pipeline,.stale #events,.stale #policies{opacity:.55}
+.empty{padding:30px 14px;color:var(--muted);background:var(--paper)}.stale #pipeline,.stale #events{opacity:.55}
 @media(max-width:1000px){.overview{grid-template-columns:1fr}.score:last-child{border-right:0}.components{border-top:1px solid var(--line)}
 .table-head,.event-summary{grid-template-columns:minmax(160px,1fr) minmax(180px,2fr) 100px 85px 65px;gap:10px}}
 @media(max-width:700px){main{padding:16px 12px}.top{flex-direction:column;gap:10px}.refresh{text-align:left}h1{font-size:21px}
@@ -85,11 +84,9 @@ input{width:260px}select{max-width:270px}input:focus-visible,select:focus-visibl
 <div id="scores" class="score-row" aria-label="风险评分"></div>
 <section class="components"><h2>组件状态</h2><div id="pipeline" class="services"></div></section>
 </div>
-<section class="policies"><h2>BPF LSM 保护策略</h2><div id="policies"></div></section>
 <section class="events">
 <div class="section-head"><h2>最近事件 <span id="event-count" class="muted"></span></h2><span id="window" class="muted"></span></div>
 <div class="toolbar">
-<label>筛选<select id="filter"><option value="all">全部事件</option><option value="deny">已拦截</option><option value="audit">审计放行</option><option value="falco">仅 Falco 告警</option></select></label>
 <label>搜索<input id="search" type="search" placeholder="规则、进程、路径或事件编号" autocomplete="off"></label>
 <label>PID<input id="pid" type="number" min="1" max="2147483647" placeholder="全部"></label>
 <label>计分<select id="scoring"><option value="all">全部状态</option><option value="scored">有扣分</option><option value="zero">未扣分</option></select></label>
@@ -105,11 +102,10 @@ input{width:260px}select{max-width:270px}input:focus-visible,select:focus-visibl
 <script>
 const $=s=>document.querySelector(s);
 const localZone=Intl.DateTimeFormat().resolvedOptions().timeZone||"UTC";
-const timeKinds={falco_event:"Falco 发生时间",bpf_received:"BPF 控制器收件时间",tsa_received:"TSA 入库时间"};
-const sourceNames={falco:"Falco",bpf_lsm:"BPF LSM"};
+const timeKinds={falco_event:"Falco 发生时间",tsa_received:"TSA 入库时间"};
+const sourceNames={falco:"Falco"};
 const statusNames={scored:"已计分",duplicate:"去重，不重复扣分",rate_limited:"限速，不扣分",maintenance:"维护，不扣分",maintenance_reclassified:"维护，不扣分",whitelisted:"白名单，不扣分",ignored:"不计分"};
-const ruleNames={"Program run with disallowed http proxy env":"进程使用未允许的代理环境","Write below etc":"写入 /etc 下的文件","Monitor specific file access":"打开演示保护文件","Read sensitive file untrusted":"程序读取敏感文件（未列入规则例外）","Non sudo setuid":"非 sudo 程序切换用户身份"};
-const operationNames={write:"写入",unlink:"删除",rename:"重命名",setattr:"修改属性",mmap:"共享可写映射",mprotect:"升级映射写权限"};
+const ruleNames={"Program run with disallowed http proxy env":"进程使用未允许的代理环境","Write below etc":"写入 /etc 下的文件","Monitor specific file access":"打开演示文件","Read sensitive file untrusted":"程序读取敏感文件（未列入规则例外）","Non sudo setuid":"非 sudo 程序切换用户身份"};
 let current=null,eventSignature="",pending=false,timer=null,before=0;
 const initial=new URLSearchParams(location.search);
 let after=/^\d+$/.test(initial.get("after")||"")?initial.get("after"):"0";
@@ -131,22 +127,15 @@ function renderScore(data){const root=$("#scores");root.replaceChildren();
     const box=el("div","score");box.append(el("span","muted",name),el("strong",val==null?"unknown":"",val==null?"未评估":Number(val).toFixed(1)),el("small","",note));root.append(box)})}
 function renderPipeline(stages){const root=$("#pipeline");root.replaceChildren();
   stages.forEach(s=>{const box=el("div","service");const left=el("div");left.append(el("strong","",s.name),el("small","",s.detail));
-    const status=el("span","state"+(s.active?"":" bad"),s.active?"运行中":({"inactive":"未运行","failed":"失败","activating":"启动中"}[s.status]||s.status));
+    const status=el("span","state"+(s.active?"":" bad"),s.active?(s.name==="Lynis"?"报告有效":"运行中"):({"inactive":"未运行","failed":"失败","activating":"启动中"}[s.status]||s.status));
     box.append(left,status);root.append(box)})}
-function renderPolicies(items){const root=$("#policies");root.replaceChildren();
-  if(!items.length){root.append(el("div","empty","暂无保护策略"));return}
-  items.forEach(p=>{const box=el("div","policy");const line=el("div","policy-line");
-    line.append(el("strong","",p.name),el("span","badge "+(p.mode==="enforce"?"deny":"audit"),({enforce:"ENFORCE · 拒绝",audit:"AUDIT · 放行"}[p.mode]||"模式未知")),el("span","muted","策略 #"+p.id+" · 允许 UID："+(p.allowed_uids.join(", ")||"无")));
-    box.append(line,el("div","policy-path",p.paths.join(", ")));root.append(box)})}
-function groupTitle(x){const b=x.evidence.bpf_lsm;
-  if(b)return (operationNames[b.operation]||b.operation||"文件操作")+" · "+(b.policy_name||"保护策略");
-  const f=x.evidence.falco;return ruleNames[f.rule]||f.rule||x.title}
+function groupTitle(x){const f=x.evidence.falco;return ruleNames[f.rule]||f.rule||x.title}
 function statusText(x,short=false){const counts=x.status_counts||Object.values(x.evidence).reduce((a,e)=>(a[e.status]=(a[e.status]||0)+1,a),{});
   const names=short?{scored:"计分",duplicate:"去重未扣分",rate_limited:"限额未扣分",maintenance:"维护",maintenance_reclassified:"维护",whitelisted:"白名单",ignored:"不计分"}:statusNames;
   return Object.entries(counts).map(([s,n])=>(names[s]||s)+" ×"+n).join("；")}
 function renderEvidence(source,item){
   const row=el("div","evidence-row");row.append(el("strong","",(sourceNames[source]||source)+" #"+item.id),el("div","",item.rule),
-    el("div","subline",(source==="falco"?"事件发生：":"控制器收件：")+formatTime(item.event_time)),
+    el("div","subline","事件发生："+formatTime(item.event_time)),
     el("div","subline","TSA 入库："+formatTime(item.received_time)),el("div","subline",(statusNames[item.status]||item.status)+" · 历史扣分 "+item.deducted_points));
   if(item.risk_expires_at&&item.deducted_points>0)row.append(el("div","subline","计分到期："+formatTime(new Date(item.risk_expires_at*1000).toISOString())));
   if(item.file)row.append(el("div","subline","文件："+item.file));
@@ -157,11 +146,11 @@ function renderEvidence(source,item){
 }
 function renderEvents(force=false){
   if(!current)return;
-  const items=$("#grouped").checked?current.summaries:current.incidents,filter=$("#filter").value,scoring=$("#scoring").value;
-  const signature=JSON.stringify([items,filter,scoring,zone(),$("#grouped").checked]);
+  const items=$("#grouped").checked?current.summaries:current.incidents,scoring=$("#scoring").value;
+  const signature=JSON.stringify([items,scoring,zone(),$("#grouped").checked]);
   if(!force&&signature===eventSignature)return;
   eventSignature=signature;
-  const selected=items.filter(x=>(filter==="all"||x.badge_class===filter)&&(scoring==="all"||(scoring==="scored"?x.deducted_points>0:x.deducted_points===0)));
+  const selected=items.filter(x=>scoring==="all"||(scoring==="scored"?x.deducted_points>0:x.deducted_points===0));
   $("#event-count").textContent="· 本页 "+selected.length+" / "+items.length+($("#grouped").checked?" 组":" 项");
   const root=$("#events");root.replaceChildren();
   if(!selected.length){root.append(el("div","empty",items.length?"没有符合条件的事件":"暂无事件"));return}
@@ -175,7 +164,7 @@ function renderEvents(force=false){
     if(targets.length)main.append(el("span","subline",targets.length===1?targets[0]:targets.length+" 个路径 · "+targets.slice(0,2).join("、")));
     main.append(el("span","subline",x.activity_count>1?"同类活动 "+x.activity_count+" 项 / "+x.record_count+" 条证据（非同一次操作）":Object.values(x.evidence).map(e=>e.rule).join(" + ")));
     const sources=el("div","source",x.sources.map(s=>sourceNames[s]||s).join(" + "));
-    sources.append(el("span","subline",x.sources.length===2?"推测关联":"单源记录"));
+    sources.append(el("span","subline","告警记录"));
     const outcome=el("div","outcome");outcome.append(el("span","badge "+x.badge_class,x.decision));
     const points=el("div","points",x.deducted_points?"−"+x.deducted_points:"0");
     points.append(el("span","subline",statusText(x,true)));
@@ -192,7 +181,7 @@ function renderEvents(force=false){
 $("#events").addEventListener("toggle",e=>{if(!$("#events").contains(e.target)||!e.target.dataset.openKey)return;
   if(e.target.open)expanded.add(e.target.dataset.openKey);else expanded.delete(e.target.dataset.openKey)},true);
 function render(){
-  renderScore(current.scores);renderPipeline(current.pipeline);renderPolicies(current.policies);renderEvents();
+  renderScore(current.scores);renderPipeline(current.pipeline);renderEvents();
   $("#refresh").textContent="页面刷新："+formatTime(current.generated_time);
   $("#zone-label").textContent="显示时区："+zone();
   $("#window").textContent="本页 "+current.event_window.records+" 条证据 · "+current.summaries.length+" 组同类活动 · 非规则数量";
@@ -202,7 +191,6 @@ function render(){
 }
 $("#timezone").options[0].textContent="本地 · "+localZone;
 $("#timezone").addEventListener("change",()=>{if(current)render();if(document.body.classList.contains("stale"))renderScore({final:null,posture:null,runtime:null})});
-$("#filter").addEventListener("change",()=>renderEvents());
 $("#scoring").addEventListener("change",()=>renderEvents());
 $("#grouped").addEventListener("change",()=>renderEvents());
 function eventUrl(){const p=new URLSearchParams({before:String(before),after,pid:$("#pid").value||"0",q:$("#search").value.trim()});return "/api/status?"+p}
@@ -262,13 +250,12 @@ def service_state(name: str) -> str:
 
 
 class DashboardData:
-    def __init__(self, tsa_config: Path, bpf_policy: Path):
+    def __init__(self, tsa_config: Path):
         with tsa_config.open("r", encoding="utf-8") as stream:
             self.config = yaml.safe_load(stream) or {}
         storage = self.config.get("storage", {}) or {}
         state_db = Path(str(storage.get("state_db", "state/tsa.db"))).expanduser()
         self.state_db = state_db if state_db.is_absolute() else tsa_config.parent / state_db
-        self.bpf_policy = bpf_policy
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(
@@ -293,7 +280,7 @@ class DashboardData:
             SELECT id, received_time, event_time, source, rule_name, status,
                    deducted_points, payload, risk_expires_at
             FROM events
-            WHERE (? = 0 OR id < ?) AND id > ?
+            WHERE source = 'falco' AND (? = 0 OR id < ?) AND id > ?
               AND (? = 0 OR CAST(json_extract(payload, '$.pid') AS INTEGER) = ?)
               AND (? = '' OR instr(lower(source || ':' || id || ' ' || rule_name || ' ' || payload), lower(?)) > 0)
             ORDER BY id DESC LIMIT ?
@@ -334,7 +321,7 @@ class DashboardData:
         rows = db.execute(
             """
             SELECT rule_name, SUM(deducted_points) points FROM events
-            WHERE status='scored' AND deducted_points > 0
+            WHERE source='falco' AND status='scored' AND deducted_points > 0
               AND risk_expires_at IS NOT NULL AND risk_expires_at > ?
             GROUP BY rule_name
             """,
@@ -366,17 +353,15 @@ class DashboardData:
             reasons.append("TSA heartbeat is missing or stale")
         if service_state("tsa-fusion.service") != "active":
             reasons.append("tsa-fusion.service is not active")
-        for key, service in (("runtime_rules", "falco-modern-bpf.service"),
-                             ("bpf_lsm", "bpf-lsm-controller.service")):
-            enabled = state.get("enabled_sources", {}).get(
-                key, (self.config.get(key, {}) or {}).get("enabled", key == "runtime_rules")
-            )
-            if enabled:
-                if service_state(service) != "active":
-                    reasons.append(f"{service} is not active")
-                source = "falco" if key == "runtime_rules" else "bpf_lsm"
-                if not state.get("source_status", {}).get(source, False):
-                    reasons.append(f"{source} event log is unavailable")
+        enabled = state.get("enabled_sources", {}).get(
+            "runtime_rules", (self.config.get("runtime_rules", {}) or {}).get("enabled", True)
+        )
+        if not enabled:
+            reasons.append("Falco monitoring is disabled")
+        if service_state("falco-modern-bpf.service") != "active":
+            reasons.append("falco-modern-bpf.service is not active")
+        if not state.get("source_status", {}).get("falco", False):
+            reasons.append("falco event log is unavailable")
         runtime_ready = not reasons
         baseline = state.get("baseline_status", "unavailable")
         weights = (self.config.get("scoring", {}) or {}).get("weights", {}) or {}
@@ -384,31 +369,11 @@ class DashboardData:
             float(weights.get(key, default)) > 0 for key, default in
             (("posture", 0.4), ("runtime", 0.6))
         )
-        if needs_baseline and (baseline not in ("ok", "disabled") or state.get("posture_score") is None):
+        if needs_baseline and (baseline != "ok" or state.get("posture_score") is None):
             reasons.append("Lynis baseline is unavailable")
         return {"ready": not reasons, "runtime_ready": runtime_ready, "reason": "; ".join(reasons),
                 "baseline_status": baseline, "heartbeat": heartbeat or None}
 
-    def _policies(self) -> List[Dict[str, Any]]:
-        try:
-            with self.bpf_policy.open("r", encoding="utf-8") as stream:
-                document = yaml.safe_load(stream) or {}
-        except OSError:
-            return []
-        result = []
-        for policy in document.get("policies", []) or []:
-            if not isinstance(policy, Mapping):
-                continue
-            result.append(
-                {
-                    "id": policy.get("id", 0),
-                    "name": str(policy.get("name", "unnamed")),
-                    "mode": str(policy.get("mode", "unknown")).lower(),
-                    "paths": list(policy.get("paths", []) or []),
-                    "allowed_uids": list(policy.get("allowed_uids", []) or []),
-                }
-            )
-        return result
 
     @staticmethod
     def _tsa_step(event: Mapping[str, Any]) -> str:
@@ -426,145 +391,35 @@ class DashboardData:
         return labels.get(status, f"TSA 已接收：状态 {status}，扣分 {points}")
 
     def _incidents(self, events: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        falco = [item for item in events if item.get("source") == "falco"]
-        paired_falco = set()
         incidents = []
-        policy_paths = {
-            str(policy["name"]): set(policy["paths"]) for policy in self._policies()
-        }
         for event in events:
-            if event.get("source") != "bpf_lsm":
+            if event.get("source") != "falco":
                 continue
-            event_ts = parse_time(str(event.get("event_time", "")))
-            pid = str(event.get("pid", ""))
-            match: Optional[Dict[str, Any]] = None
-            match_basis = ""
-            matches = []
-            for candidate in falco:
-                if candidate["id"] in paired_falco:
-                    continue
-                candidate_ts = parse_time(str(candidate.get("event_time", "")))
-                if not event_ts or not candidate_ts or abs(candidate_ts - event_ts) > 3:
-                    continue
-                syscall = candidate.get("syscall", "")
-                compatible = {
-                    "write": {"open", "openat", "openat2", "write", "writev", "pwrite", "pwritev"},
-                    "unlink": {"unlink", "unlinkat"}, "rename": {"rename", "renameat", "renameat2"},
-                    "setattr": {"chmod", "fchmod", "fchmodat", "chown", "fchown", "fchownat", "truncate", "ftruncate"},
-                    "mmap": {"mmap"}, "mprotect": {"mprotect"},
-                }
-                if syscall:
-                    if syscall not in compatible.get(event.get("operation"), set()):
-                        continue
-                    if event.get("operation") == "write" and syscall.startswith("open") and candidate.get("is_open_write") is not True:
-                        continue
-                elif not (event.get("operation") == "write" and candidate.get("rule") == "Write below etc"):
-                    continue
-                candidate_pid = str(candidate.get("pid", ""))
-                same_pid = bool(pid and candidate_pid and candidate_pid == pid)
-                same_process = (
-                    bool(event.get("command"))
-                    and str(candidate.get("process", "")) == str(event.get("command"))
-                )
-                same_path = str(candidate.get("file", "")) in policy_paths.get(
-                    str(event.get("policy_name", "")), set()
-                )
-                if candidate_pid and not same_pid:
-                    continue
-                if candidate.get("uid") is not None and event.get("uid") is not None and str(candidate["uid"]) != str(event["uid"]):
-                    continue
-                if same_path and (same_pid or (not candidate_pid and same_process)):
-                    matches.append((candidate, "PID + 路径 + 操作 + 源时间" if same_pid else "进程名 + 保护路径 + 操作 + 源时间（缺少 PID）"))
-            # A shared PID/path and a short interval are not a unique syscall ID.
-            if len(matches) == 1:
-                match, match_basis = matches[0]
-                paired_falco.add(match["id"])
-
-            action = str(event.get("action", "unknown")).lower()
-            operation = str(event.get("operation", "unknown"))
-            command = str(event.get("command", "unknown"))
-            policy = str(event.get("policy_name", event.get("rule", "unknown")))
-            steps = [f"进程 {command} 请求执行 {operation}"]
-            if match:
-                steps.append(
-                    f"疑似关联 Falco：{match.get('rule')}（{match_basis}；非唯一操作标识）"
-                )
-            else:
-                steps.append("没有可唯一配对的 Falco 候选；不代表未检测或操作安全")
-            steps.append(f"BPF LSM 命中策略：{policy}")
-            if action == "deny":
-                decision = "已拦截"
-                badge = "deny"
-                steps.append("BPF LSM 返回 -EPERM：内核拒绝操作")
-            elif action == "audit":
-                decision = "审计放行"
-                badge = "audit"
-                steps.append("BPF LSM 审计放行；最终写入是否成功需核对测试命令结果")
-            else:
-                decision = action
-                badge = "audit"
-                steps.append(f"BPF LSM 返回决策：{action}")
-            steps.append(self._tsa_step(event))
-            evidence = {"bpf_lsm": event}
-            if match:
-                evidence["falco"] = match
-                steps.append(self._tsa_step(match) + "（Falco 独立计分）")
-                steps.append("汇总为两路历史扣分之和；不等于一次攻击或当前总分变化")
-            incidents.append(
-                {
-                    "time": event.get("received_time", ""),
-                    "title": f"{command} · {operation} · {policy}",
-                    "pid": event.get("pid", ""),
-                    "decision": decision,
-                    "badge_class": badge,
-                    "steps": steps,
-                    "evidence": evidence,
-                    "_timestamp": parse_time(str(event.get("received_time", ""))),
-                    "correlation": "heuristic" if match else "none",
-                }
-            )
-
-        for event in falco:
-            if event["id"] in paired_falco:
-                continue
-            process = str(event.get("process", "") or event.get("command", "unknown"))
-            incidents.append(
-                {
-                    "time": event.get("received_time", ""),
-                    "title": f"{event.get('rule')} · {process}",
-                    "pid": event.get("pid", ""),
-                    "decision": "Falco 报警",
-                    "badge_class": "falco",
-                    "steps": [
-                        f"Falco 观察到系统调用并匹配规则：{event.get('rule')}",
-                        "Falco 只报警，不负责阻止该操作",
-                        "未关联到 BPF LSM 策略命中；不能据此判断操作被拦截",
-                        self._tsa_step(event),
-                    ],
-                    "evidence": {"falco": event},
-                    "_timestamp": parse_time(str(event.get("received_time", ""))),
-                }
-            )
-        incidents.sort(key=lambda item: item["_timestamp"], reverse=True)
-        for incident in incidents:
-            incident.pop("_timestamp", None)
-            evidence = incident["evidence"]
-            primary = evidence.get("bpf_lsm", evidence.get("falco"))
-            source = "bpf_lsm" if "bpf_lsm" in evidence else "falco"
-            event_time = str(primary.get("event_time", ""))
+            event_time = str(event.get("event_time", ""))
             has_event_time = bool(parse_time(event_time))
-            incident.update({
-                "id": f"{source}:{primary['id']}",
-                "display_time": event_time if has_event_time else primary.get("received_time", ""),
-                "time_kind": ("bpf_received" if source == "bpf_lsm" else "falco_event")
-                if has_event_time else "tsa_received",
-                "received_time": primary.get("received_time", ""),
-                "process": primary.get("process") or primary.get("command", ""),
-                "target": evidence.get("falco", {}).get("file", ""),
-                "sources": list(evidence),
-                "deducted_points": sum(int(item.get("deducted_points", 0)) for item in evidence.values()),
+            process = event.get("process") or event.get("command", "")
+            incidents.append({
+                "id": f"falco:{event['id']}",
+                "time": event.get("received_time", ""),
+                "title": f"{event.get('rule')} · {process}",
+                "pid": event.get("pid", ""),
+                "decision": "Falco 报警",
+                "badge_class": "falco",
+                "steps": [
+                    f"Falco 匹配规则：{event.get('rule')}",
+                    "仅记录和评分，不阻断操作或终止进程",
+                    self._tsa_step(event),
+                ],
+                "evidence": {"falco": event},
+                "display_time": event_time if has_event_time else event.get("received_time", ""),
+                "time_kind": "falco_event" if has_event_time else "tsa_received",
+                "received_time": event.get("received_time", ""),
+                "process": process,
+                "target": event.get("file", ""),
+                "sources": ["falco"],
+                "deducted_points": int(event.get("deducted_points", 0)),
             })
-        return incidents
+        return sorted(incidents, key=lambda x: parse_time(x["received_time"]), reverse=True)
 
     @staticmethod
     def _summaries(incidents: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -574,8 +429,7 @@ class DashboardData:
         for incident in reversed(incidents):
             identity = []
             for source, event in sorted(incident["evidence"].items()):
-                fields = ("rule", "pid", "process", "command", "user", "uid", "container_id", "executable",
-                          "policy_id", "operation", "action", "device", "inode")
+                fields = ("rule", "pid", "process", "command", "user", "uid", "container_id", "executable")
                 identity.append([source, *[event.get(k, "") for k in fields]])
             key = json.dumps(identity, ensure_ascii=False, sort_keys=True)
             ts = parse_time(str(incident["received_time"]))
@@ -621,13 +475,10 @@ class DashboardData:
             scores["final"] = None
         if not availability["runtime_ready"]:
             scores["runtime"] = None
-        policies = self._policies()
         states = {
             "falco": service_state("falco-modern-bpf.service"),
-            "bpf": service_state("bpf-lsm-controller.service"),
             "tsa": service_state("tsa-fusion.service"),
         }
-        modes = sorted({item["mode"].upper() for item in policies}) or ["无策略"]
         pipeline = [
             {
                 "name": "Falco",
@@ -636,10 +487,10 @@ class DashboardData:
                 "detail": "观察行为并按规则报警",
             },
             {
-                "name": "BPF LSM",
-                "active": states["bpf"] == "active",
-                "status": states["bpf"],
-                "detail": "策略文件：" + "/".join(modes),
+                "name": "Lynis",
+                "active": availability["baseline_status"] == "ok",
+                "status": "报告有效" if availability["baseline_status"] == "ok" else "报告不可用",
+                "detail": "系统基线报告",
             },
             {
                 "name": "TSA",
@@ -660,7 +511,6 @@ class DashboardData:
             "scores": scores,
             "availability": availability,
             "pipeline": pipeline,
-            "policies": policies,
             "incidents": incidents,
             "summaries": self._summaries(incidents),
             "event_window": {"records": len(events), "limit": 200, "has_more": has_more,
@@ -803,10 +653,6 @@ def parse_args() -> argparse.Namespace:
         "--tsa-config",
         default=str(Path(__file__).with_name("policy_config.yaml")),
     )
-    parser.add_argument(
-        "--bpf-policy",
-        default="/etc/bpf-lsm/policy.yaml",
-    )
     parser.add_argument("--bind", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8766)
     return parser.parse_args()
@@ -820,7 +666,6 @@ def main() -> int:
     )
     server.data = DashboardData(  # type: ignore[attr-defined]
         Path(args.tsa_config).expanduser().resolve(),
-        Path(args.bpf_policy).expanduser().resolve(),
     )
     print(f"TSA dashboard listening on http://{args.bind}:{args.port}/")
     try:

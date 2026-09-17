@@ -13,22 +13,18 @@ from verify_runtime import evaluate, write_demo
 
 class VerificationTests(unittest.TestCase):
     def setUp(self):
-        self.falco = {"source": "falco", "pid": 77, "file": "/etc/tsa-protected-demo"}
-        self.bpf = {"source": "bpf_lsm", "pid": 77, "operation": "write", "action": "audit",
-                    "result": 0, "device": 8, "inode": 9}
+        self.falco = {"source": "falco", "pid": 77, "file": "/etc/tsa-protected-demo",
+                      "syscall": "openat", "is_open_write": True}
 
-    def test_audit_requires_write_success_and_both_sources(self):
+    def test_detection_requires_successful_write_and_matching_falco_evidence(self):
         attempt = {"pid": 77, "outcome": "written"}
-        self.assertTrue(evaluate([self.falco, self.bpf], attempt, 8, 9, "audit")[0])
-        for rows in ([], [self.falco], [self.bpf], [self.falco, {**self.bpf, "pid": 78}],
-                     [self.falco, {**self.bpf, "inode": 10}], [self.falco, {**self.bpf, "result": -1}]):
-            self.assertFalse(evaluate(rows, attempt, 8, 9, "audit")[0])
-        self.assertFalse(evaluate([self.falco, self.bpf], {"pid": 77, "outcome": "error"}, 8, 9, "audit")[0])
-
-    def test_deny_requires_actual_eperm_and_matching_kernel_evidence(self):
-        event = {**self.bpf, "action": "deny", "result": -1}
-        self.assertTrue(evaluate([event], {"pid": 77, "outcome": "denied"}, 8, 9, "deny")[0])
-        self.assertFalse(evaluate([event], {"pid": 77, "outcome": "written"}, 8, 9, "deny")[0])
+        self.assertTrue(evaluate([self.falco], attempt)[0])
+        for rows in ([], [{**self.falco, "pid": 78}], [{**self.falco, "file": "/etc/other"}],
+                     [{**self.falco, "is_open_write": False}],
+                     [{**self.falco, "source": "bpf_lsm"}]):
+            self.assertFalse(evaluate(rows, attempt)[0])
+        for outcome in ("error", "denied"):
+            self.assertFalse(evaluate([self.falco], {"pid": 77, "outcome": outcome})[0])
 
     @unittest.skipUnless(os.name == "posix", "Linux file flags")
     def test_denied_write_is_not_retried_by_a_buffered_stream(self):

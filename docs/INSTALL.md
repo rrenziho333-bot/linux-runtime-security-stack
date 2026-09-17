@@ -1,342 +1,169 @@
 # Ubuntu 复现指南
 
-适用：Ubuntu 22.04 LTS x86_64、systemd、可 sudo 的普通用户；实验虚拟机建议 2 核、4 GB 内存、30 GB 磁盘，先做快照。终端和 APT 都需要能访问软件源、GitHub、Go 下载站与模块代理；受限网络先配置可用代理，只有浏览器能联网还不够。命令报错时先解决，再从失败命令继续，不要跳过校验或重新克隆覆盖已有目录。
+适用 Ubuntu 22.04 x86_64、systemd、可 sudo 的普通用户。建议虚拟机 2 核、4 GB 内存，操作前做快照。
+本项目只做 **Lynis 基线检测 + Falco 告警 + TSA 评分**，不阻断、不终止进程；无需安装 Go 或启用 BPF LSM。
 
-已在干净 Ubuntu 22.04.5 虚拟机实测：6.8 HWE 内核、Falco 0.44.1、Go 1.26.8。默认 **audit（记录、放行）**；**enforce（拒绝操作）也已验证**，切换方法见第 4 节。
+2026-09-17 已在 iie-os 的 Ubuntu 22.04、6.8 内核、Falco 0.44.1 上验证旧版迁移、62 项回归测试及真实告警入库。这是已有虚拟机上的部署验证，不是本轮新装裸机或全部规则攻击实测。
 
-## 1. 准备系统与内核
+## 1. 准备依赖
 
-在 Ubuntu 终端用普通用户操作，**先执行 1.6～1.9 检查**。1.7 显示 `BTF OK`、1.8 显示 `CONFIG_BPF_LSM=y`，即内核检查通过。
-
-| 检查结果 | 接下来做什么 |
-|---|---|
-| 内核通过，1.9 含 `bpf` | 不改内核，跳到 1.14 |
-| 内核通过，1.9 不含 `bpf` | 执行 1.10～1.14，启用 BPF LSM |
-| 内核未通过 | 执行 1.3、1.4B、1.5，重启后重新检查 |
-
-**依赖另行确认**：内核通过但依赖未装齐或不确定时，先执行 1.3、1.4A；都已齐全才可跳过 1.1～1.5。原软件源可用时，无需执行 1.1、1.2。
-
-**命令 1.1（可选）：备份软件源。**
-```bash
-sudo cp -n /etc/apt/sources.list /etc/apt/sources.list.lrss-backup
-```
-
-**命令 1.2（可选）：切换镜像源。**
-```bash
-sudo sed -i -E 's@https?://([a-z.]*archive|security)\.ubuntu\.com/ubuntu/?@https://mirrors.aliyun.com/ubuntu/@g' /etc/apt/sources.list
-```
-
-**命令 1.3：更新软件包索引。**
+**命令 1.1：更新软件包索引。**
 ```bash
 sudo apt-get -o APT::Update::Error-Mode=any update
 ```
 
-**命令 1.4A（与 1.4B 二选一）：内核检查通过时，仅安装软件依赖。**
+**命令 1.2：安装依赖。**
 ```bash
 sudo apt-get install -y ca-certificates curl gnupg git python3-yaml jq lynis logrotate
 ```
 
-**命令 1.4B（与 1.4A 二选一）：内核检查未通过时，安装依赖与 HWE 内核。**
-```bash
-sudo apt-get install -y ca-certificates curl gnupg git python3-yaml jq lynis logrotate linux-generic-hwe-22.04
-```
-
-**命令 1.5（安装内核后执行）：重启；重新登录后再执行 1.6。**
-```bash
-sudo reboot
-```
-
-以下检查可在安装前执行；若安装了内核，则重启后重新执行。先确认内核能力，再决定是否启用 BPF LSM（保留当前启用的其他 LSM）：
-
-**命令 1.6：查看当前内核。**
-```bash
-uname -r
-```
-
-**命令 1.7：检查 BTF；必须输出 `BTF OK`。**
+**命令 1.3：检查 Falco 采集所需的 BTF，预期输出 BTF OK。**
 ```bash
 test -r /sys/kernel/btf/vmlinux && echo "BTF OK" || echo "BTF MISSING"
 ```
 
-**命令 1.8：必须输出 `CONFIG_BPF_LSM=y`。**
-```bash
-grep '^CONFIG_BPF_LSM=y' /boot/config-"$(uname -r)"
-```
+Ubuntu 22.04 通常已有可用内核。BTF 缺失或 Falco 提示内核不支持时，安装 `linux-generic-hwe-22.04` 并重启后重试；**不修改 GRUB 的 LSM 配置**。
 
-**命令 1.9：查看已启用的安全模块。**
-```bash
-sudo cat /sys/kernel/security/lsm
-```
+APT 出现 403 时先修复对应软件源；第三方源握手失败应修复网络或临时禁用该源，不要关闭签名或 TLS 验证。
 
-如果 1.7 或 1.8 检查失败，先解决内核问题，不要继续。1.9 输出含 `bpf` 时，跳过 1.10 至 1.13，直接执行 1.14；不含时，在同一个终端依次执行 1.10 至 1.13。以下引导修改仅用于 Ubuntu GRUB。
+## 2. 安装 Falco
 
-**命令 1.10（条件执行）：保存当前安全模块列表。**
-```bash
-LSM="$(sudo cat /sys/kernel/security/lsm)"
-```
+已安装 Falco 0.44.1 时可跳过本节。以下使用[官方签名软件源](https://falco.org/docs/setup/packages/)与 modern eBPF 驱动。
 
-**命令 1.11（多行，共 2 行，条件执行）：写入启用 BPF LSM 的启动配置。**
-```bash
-printf 'GRUB_CMDLINE_LINUX_DEFAULT="$GRUB_CMDLINE_LINUX_DEFAULT lsm=%s,bpf"\n' "$LSM" \
-  | sudo tee /etc/default/grub.d/99-lrss-bpf.cfg
-```
-
-**命令 1.12（条件执行）：更新 GRUB 配置。**
-```bash
-sudo update-grub
-```
-
-**命令 1.13（条件执行）：重启；重新登录后再执行 1.14。**
-```bash
-sudo reboot
-```
-
-**命令 1.14：必须输出包含 `bpf` 的模块列表。**
-```bash
-sudo grep -w bpf /sys/kernel/security/lsm
-```
-
-无 BPF LSM 的部署会降级为纯检测，不能算完整复现。
-
-## 2. 安装 Falco 和 Go
-
-Falco 使用官方签名软件源、modern eBPF；关闭系统规则自动更新，项目使用自己的锁定规则包：
-
-**命令 2.1：下载 Falco 软件源公钥。**
+**命令 2.1：下载公钥。**
 ```bash
 curl -fL --retry 3 https://falco.org/repo/falcosecurity-packages.asc -o /tmp/falcosecurity.asc
 ```
 
-**命令 2.2：安装软件源公钥。**
+**命令 2.2：安装公钥。**
 ```bash
 sudo gpg --batch --yes --dearmor -o /usr/share/keyrings/falco-archive-keyring.gpg /tmp/falcosecurity.asc
 ```
 
-**命令 2.3（多行，共 2 行）：添加 Falco 软件源。**
+**命令 2.3：添加软件源。**
 ```bash
-echo 'deb [signed-by=/usr/share/keyrings/falco-archive-keyring.gpg] https://download.falco.org/packages/deb stable main' \
-  | sudo tee /etc/apt/sources.list.d/falcosecurity.list
+echo 'deb [arch=amd64 signed-by=/usr/share/keyrings/falco-archive-keyring.gpg] https://download.falco.org/packages/deb stable main' | sudo tee /etc/apt/sources.list.d/falcosecurity.list
 ```
 
-**命令 2.4：更新软件包索引。**
+**命令 2.4：更新索引。**
 ```bash
 sudo apt-get -o APT::Update::Error-Mode=any update
 ```
 
-**命令 2.5：安装指定版本的 Falco。**
+**命令 2.5：安装 Falco。**
 ```bash
 sudo env FALCO_FRONTEND=noninteractive FALCO_DRIVER_CHOICE=modern_ebpf FALCOCTL_ENABLED=no apt-get install -y falco=0.44.1
 ```
 
-**命令 2.6：确认 Falco 版本。**
-```bash
-falco --version
-```
+若指定版本不可用，先查明软件源及可用版本，不要跳过版本兼容验证。Falco 使用 eBPF 采集系统调用，这不是被移除的 BPF LSM 阻断组件。
 
-Go 安装到用户独立目录，不删除系统原有工具链；解压前必须看到校验 `OK`：
+## 3. 克隆、生成基线并部署
 
-**命令 2.7：创建 Go 安装目录。**
-```bash
-mkdir -p "$HOME/.local/lib/lrss-go1.26.8"
-```
-
-**命令 2.8：下载 Go。**
-```bash
-curl -fL --retry 3 https://go.dev/dl/go1.26.8.linux-amd64.tar.gz -o /tmp/lrss-go1.26.8.tar.gz
-```
-
-**命令 2.9：校验下载文件；必须看到 `OK` 才能继续。**
-```bash
-echo 'd0f743b33e8d8945e6b1f432edd15785c70507121d6e2a723b21285eddf8b57b  /tmp/lrss-go1.26.8.tar.gz' | sha256sum -c -
-```
-
-**命令 2.10：解压 Go。**
-```bash
-tar -xzf /tmp/lrss-go1.26.8.tar.gz -C "$HOME/.local/lib/lrss-go1.26.8"
-```
-
-**命令 2.11：确认 Go 版本。**
-```bash
-"$HOME/.local/lib/lrss-go1.26.8/go/bin/go" version
-```
-
-## 3. 克隆、准备基线并部署
-
-以下命令在同一个终端中按顺序执行。路径不要含空格或中文；已有同名目录时使用新的目录，不要覆盖原项目。
-
-**命令 3.1：查看 UTC 时间，确认日期和时间正确。**
-```bash
-date -u
-```
-
-**命令 3.2：确认系统时间已同步。**
-```bash
-timedatectl
-```
-
-VMware 时间反复跳动时才执行 3.3、3.4，然后重新执行 3.1、3.2；开机/恢复后也要检查。时间正确且同步完成后才能继续生成基线。
-
-**命令 3.3（可选）：关闭 VMware Tools 周期时间同步。**
-```bash
-sudo vmware-toolbox-cmd timesync disable
-```
-
-**命令 3.4（可选）：启用系统 NTP 时间同步。**
-```bash
-sudo timedatectl set-ntp true
-```
-
-**命令 3.5：克隆项目。**
+**命令 3.1：克隆。已有本仓库时使用第 5 节更新，不覆盖原目录。**
 ```bash
 git clone https://github.com/rrenziho333-bot/linux-runtime-security-stack.git
 ```
 
-**命令 3.6：进入项目目录；后续项目命令均在这里执行。**
+**命令 3.2：进入项目；后续命令在此目录运行。**
 ```bash
 cd linux-runtime-security-stack
 ```
 
-**命令 3.7：设置当前终端使用的 Go 路径。**
+**命令 3.3：确认日期和时间正确，否则先校时。**
 ```bash
-GO_BIN="$HOME/.local/lib/lrss-go1.26.8/go/bin/go"
+timedatectl
 ```
 
-**命令 3.8：下载 Go 模块。**
-```bash
-"$GO_BIN" mod download
-```
-
-**命令 3.9（可选）：仅在 3.8 因模块代理直连失败时，用此命令重试下载。**
-```bash
-GOPROXY=https://goproxy.cn,direct "$GO_BIN" mod download
-```
-
-保留默认校验和验证。其他下载超时需先配置可用网络；不要关闭 TLS 或 APT 签名验证。下载成功后继续：
-
-**命令 3.10：验证 Go 模块。**
-```bash
-"$GO_BIN" mod verify
-```
-
-**命令 3.11：创建基线报告目录。**
+**命令 3.4：创建报告目录。**
 ```bash
 mkdir -p tsa/reports
 ```
 
-**命令 3.12：运行 Lynis，生成系统安全基线。**
+**命令 3.5：生成真实基线报告；等待命令返回。**
 ```bash
 sudo lynis audit system --quick --quiet --report-file "$PWD/tsa/reports/lynis-report.dat"
 ```
 
-**命令 3.13：设置报告所属用户。**
+`--quiet` 会减少终端输出；`long execution` 表示某项检查耗时较长，不等于审计失败。
+
+**命令 3.6：确认报告完成，应包含 finish=true。**
+```bash
+sudo grep -E '^(report_version_major|finish|hardening_index)=' tsa/reports/lynis-report.dat
+```
+
+**命令 3.7：允许当前用户的 TSA 服务读取报告。**
 ```bash
 sudo chown "$(id -un):$(id -gn)" tsa/reports/lynis-report.dat
 ```
 
-**命令 3.14：设置报告读取权限。**
+**命令 3.8：限制报告权限。**
 ```bash
 sudo chmod 0640 tsa/reports/lynis-report.dat
 ```
 
-**命令 3.15：部署项目。**
+**命令 3.9：部署。**
 ```bash
-sudo GO_BIN="$GO_BIN" ./deploy-security-stack.sh
+sudo ./deploy-security-stack.sh
 ```
 
-没有完整、新鲜的基线报告时评分为不可用，不会当成 100 分。
+部署会运行测试、安装仓库规则并启动服务。Lynis 不是常驻服务，TSA 默认只读报告；报告一天后过期，重新执行 3.5～3.8 并重启 TSA。
 
 ## 4. 验收
 
-等待约 10 秒后，在 Ubuntu 内部执行：
+部署返回后等待约 10 秒，在同一个终端继续即可。
 
-**命令 4.1：检查四个服务。**
+**命令 4.1：三个服务均应输出 active。**
 ```bash
-systemctl is-active falco-modern-bpf bpf-lsm-controller tsa-fusion tsa-dashboard
+systemctl is-active falco-modern-bpf tsa-fusion tsa-dashboard
 ```
 
-**命令 4.2：检查健康接口。**
+**命令 4.2：健康接口应返回 {"status":"ok"}。**
 ```bash
-curl --fail http://127.0.0.1:8766/healthz
+curl --fail --noproxy '*' http://127.0.0.1:8766/healthz
 ```
 
-**命令 4.3：验证一次演示文件写入，输出本次 PID、规则和证据链接。**
+**命令 4.3：真实触发一次文件写入告警。**
 ```bash
 python3 tsa/verify_runtime.py
 ```
 
-看到 `PASS` 后打开输出的链接，只查看本次测试；`FAIL` 时按提示排查。测试只向已有演示文件追加一行编号，不修改策略。
+脚本仅向已有 `/etc/tsa-protected-demo` 追加一行测试编号，核对写入成功以及同 PID、同路径的 Falco 写入证据。预期 `PASS`，并给出本次事件链接。文件名沿用历史名称，现在没有保护或拒绝含义；匹配规则可能是 `Write below etc`。
 
-**命令 4.4（排障可选）：查看 Falco 原始告警，可能包含其他进程的活动。**
+**命令 4.4：读取评分，预期 HTTP 200、data 非空。**
 ```bash
-sudo tail -n 10 /var/log/falco/falco.json
+curl --fail --noproxy '*' http://127.0.0.1:8766/systemManage/risk/score
 ```
 
-**命令 4.5（排障可选）：查看 BPF 原始事件。**
+在 **Ubuntu 浏览器**打开 `http://127.0.0.1:8766/`。Windows 访问需通过已有 SSH 连接转发，勿直接开放看板端口。
+
+**命令 4.5（排障）：查看日志。**
 ```bash
-sudo tail -n 10 /var/log/bpf-lsm/events.jsonl
+journalctl -u falco-modern-bpf -u tsa-fusion -u tsa-dashboard -n 80 --no-pager
 ```
 
-**命令 4.6：读取风险评分。**
+服务 active 不是完整验收；还要看到本次 Falco 告警入库与有效评分。此测试不代表所有规则逐条攻击验证。
+
+## 5. 更新与配置
+
+在原 Ubuntu 项目目录内：
+
+**命令 5.1：更新源码。**
 ```bash
-curl --fail http://127.0.0.1:8766/systemManage/risk/score
+git pull --ff-only
 ```
 
-**成功判据**：四行 `active`；健康为 `{"status":"ok"}`；Falco 有演示文件告警，BPF 有 `action:audit`；评分接口 HTTP 200 且 `data` 非空。在 Ubuntu 浏览器打开 `http://127.0.0.1:8766/` 看事件；此地址不是 Windows 宿主机的地址。规则名可能是官方 `Write below etc`，不要求一定命中项目规则名。
-
-**命令 4.7（可选，在自己的电脑执行）：通过已有、经过认证的 SSH 连接转发看板。**
-
-先替换命令中的用户名和 Ubuntu 地址；连接期间保留此终端，再在自己的电脑浏览器访问 `http://127.0.0.1:18766/`。不要为此把看板开放到 `0.0.0.0`。
+**命令 5.2：重新部署，不是只刷新网页。**
 ```bash
-ssh -N -L 127.0.0.1:18766:127.0.0.1:8766 用户名@Ubuntu地址
+sudo ./deploy-security-stack.sh
 ```
 
-**阻断验收（可选，已实测）**：在 Ubuntu 的项目目录中，仅将 `policy.yaml` 中 `id: 1001` 的 `mode` 改成 `enforce`，再执行 4.8。只测试演示文件，不要直接对系统关键文件启用阻断。
+从旧版升级会备份并停用、移除原 BPF LSM 控制器；备份在 `/var/backups/lrss-legacy-*`。历史日志和数据库保留，但旧 BPF 事件不再计分或出现在当前看板。旧 GRUB 配置不自动修改，避免影响其他安全模块。
 
-**命令 4.8（可选）：重新部署修改后的策略。**
-```bash
-sudo GO_BIN="$HOME/.local/lib/lrss-go1.26.8/go/bin/go" ./deploy-security-stack.sh
-```
+| 修改内容 | 文件 / 操作 |
+|---|---|
+| Falco 自定义规则 | `falco/rules.d/91-custom-rules.yaml`，见 [规则指南](FALCO_RULES.md) |
+| 基线扣分、告警扣分、权重 | `tsa/policy_config.yaml`，修改后 `sudo systemctl restart tsa-fusion tsa-dashboard` |
+| Lynis 检查内容 | 系统安装的 Lynis 测试与 profile；TSA 的 `include_controls` 只筛选计分项，不改变 Lynis 检查 |
+| 告警、数据库、评分报告 | `/var/log/falco/falco.json`、`tsa/state/tsa.db`、`tsa/reports/last_scan.json` |
 
-等待约 10 秒，再执行：
-```bash
-python3 tsa/verify_runtime.py --expect deny
-```
-预期实际写入被 `EPERM` 拒绝、BPF 有 `action:deny` 与 `result:-1`，验证输出 `PASS`。**完成后将 `mode` 改回 `audit`，再次执行 4.8，恢复默认模式。**
-
-**命令 4.9（可选）：服务失败或接口 503 时查看日志。**
-```bash
-journalctl -u falco-modern-bpf -u bpf-lsm-controller -u tsa-fusion -u tsa-dashboard -n 80 --no-pager
-```
-
-首次启动可能尚未开始采集，等待后再触发一次写入；服务 active 本身不等于检测成功。
-
-## 5. 规则与日常修改
-
-- 官方规则：`falco/official-rules/`，当前 93 条定义；默认禁用的规则不会被强制启用。
-- 添加自定义规则：`falco/rules.d/91-custom-rules.yaml`，将占位 `[]` 替换为规则列表；或在同目录增加 `*.yaml`。修改后执行 5.1、5.2。
-- 实际加载：`/etc/falco/falco.yaml` 指向 `/etc/falco/security-stack/rules/<规则包ID>/`；详细示例见 [FALCO_RULES.md](FALCO_RULES.md)。
-- 风险分配置：`tsa/policy_config.yaml`；修改后执行 5.3。默认总分为 `0.4 * posture + 0.6 * runtime`，分数越低风险越高，不是安全认证。
-- 日志与数据：Falco `/var/log/falco/falco.json`，BPF `/var/log/bpf-lsm/events.jsonl`，SQLite `tsa/state/tsa.db`，最新评分报告 `tsa/reports/last_scan.json`。
-- 看板按 60 秒汇总同类活动，原始证据不删除；零分标明去重或限额。历史扣分不等于当前风险，Falco 与 BPF 仍独立计分；“推测关联”不是唯一操作证明。搜索或 PID 查询后可翻阅更早记录。
-- Lynis 基线默认一天后过期；重新执行命令 3.12 至 3.14，再执行 5.3。TSA 默认只读取报告，不会自动执行 Lynis。
-
-以下为日常维护命令，不是首次安装的必做步骤；在 Ubuntu 的项目目录中执行。
-
-**命令 5.1（可选）：校验修改后的规则；通过后才能执行 5.2。**
-```bash
-python3 falco/manage_rules.py check
-```
-
-**命令 5.2（可选）：部署规则。**
-```bash
-sudo ./falco/deploy-host-falco.sh
-```
-
-**命令 5.3（可选）：重启评分服务，读取更新后的配置或基线。**
-```bash
-sudo systemctl restart tsa-fusion
-```
-
-规则随 main 克隆提供，但依赖、内核能力和基线仍需上述准备。控制器重启存在保护空窗；复现成功不等于生产环境已经完成补丁加固或全面安全验收。
-
-安装来源：[Ubuntu 镜像说明](https://developer.aliyun.com/mirror/ubuntu)、[Falco 官方包安装](https://falco.org/docs/setup/packages/)、[Go 官方下载](https://go.dev/dl/)。
+默认综合分 = 基线分 × 40% + 运行时分 × 60%，分数越低风险越高。基线分按选定 Lynis 检查项扣分，**不是原始 hardening_index**；运行时按未过期 Falco 事件扣分，支持去重、限额和每规则封顶。同类汇总不删除证据，历史扣分之和不等于当前分数变化。缺少有效基线或采集异常时评分不可用，不以 100 分替代。

@@ -18,26 +18,6 @@ reporting:
 maintenance:
   file: "/run/tsa-fusion/maintenance"
 
-# BPF LSM只把已经发生的审计/拒绝事件交给TSA评分。TSA不直接修改BPF map。
-bpf_lsm:
-  enabled: true
-  log_path: "/var/log/bpf-lsm/events.jsonl"
-  start_at_end: true
-  action_points:
-    audit: 2
-    deny: 8
-  risk_ttl_by_action:
-    audit: 900
-    deny: 14400
-  policy_points:
-    1001:
-      audit: 2
-      deny: 10
-  event_control:
-    dedup_window: 60
-    max_points_per_minute: 10
-    risk_ttl_seconds: 3600
-
 # --- 1. 静态姿态检查 (Posture: 基线与配置) ---
 
 baseline_lynis:

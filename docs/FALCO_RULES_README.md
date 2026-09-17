@@ -1,10 +1,10 @@
 # Falco 启用规则逐条解析
 
-本文解释 **linux-runtime-security-stack 旧仓库**的规则快照，核对基准为提交 `f8ecaeb`，日期为 2026-09-17。依据仓库中的 `condition`、引用的 `macro/list` 和项目例外进行源码分析，不用规则名称代替真实条件；这不是新一轮逐条攻击实测报告。
+本文解释 **linux-runtime-security-stack** 的规则快照。官方规则核对基准为提交 `f8ecaeb`，项目例外按当前纯检测版本更新，日期为 2026-09-17。依据 `condition`、引用的 `macro/list` 和项目例外进行源码分析；这不是逐条攻击实测报告。
 
 ## 先看结论
 
-旧仓库不是 83 条，而是 **82 条默认启用规则：81 条官方快照规则 + 1 条项目规则**。83 条属于另一个仓库 `linux-iie`，它多了一条项目演示规则，不在本文范围内。
+本仓库共 **82 条默认启用规则：81 条官方快照规则 + 1 条项目规则**。
 
 | 来源 | 定义数 | 默认启用 | 默认关闭 | 本文编号 |
 |---|---:|---:|---:|---|
@@ -16,7 +16,7 @@
 
 这些名字表示仓库内的固定文件，不代表当前上游最新版；精确上游 tag 未知，内容由 [rules.lock.json](../falco/rules.lock.json) 固定。sandbox/incubating 中的规则也会加载，不是只有第一个文件生效。
 
-**旧版全部 Falco 规则都只报警，不执行 kill。** BPF LSM 独立按 `policy.yaml` 保护文件，既不等待 Falco 报警，也不把下面 82 条条件自动变成阻断策略。TSA 扣分是另一层配置，规则的 `priority` 不等于固定扣分。
+**全部 Falco 规则只报警，不阻断操作或终止进程。** TSA 根据告警与 Lynis 报告评分；规则的 `priority` 不等于固定扣分。
 
 ## 异常行为分类
 
@@ -704,7 +704,7 @@
 
 - **触发：** `bpf` 调用的 cmd 为 5 或 `BPF_PROG_LOAD`，进程名不在 `bpf_profiled_binaries` 中。
 - **含义与边界：** 是 BPF 使用审计，正常观测工具也可能命中；**不是所有 bpf 调用，不验证程序恶意性或加载成功**。本快照实际 condition 没有描述中所说的显式方向过滤，解释以 condition 为准。
-- **排查/调整：** 查工具来源、加载目的及结果；官方名单含 falco、bpftool、systemd，项目 `95-security-stack-exceptions.yaml` 追加了控制器的截断进程名 `bpf-lsm-control`，避免组件自身告警。
+- **排查/调整：** 查工具来源、加载目的及结果；官方名单含 falco、bpftool、systemd。本规则检测异常 BPF 加载，不是项目阻断功能。
 
 ## 四、项目规则：1 条
 
@@ -714,7 +714,7 @@
 
 - **触发：** `open/openat/openat2`，`fd.name` 恰好为 `/etc/tsa-protected-demo`，且以读或写方式打开。
 - **含义与边界：** 用于演示检测链路；没有恶意进程或用户判断，合法 cat/tee 也可能报警。**它没有复用 `open_read/open_write`，也没有显式要求成功返回**；不能因报警就断言文件已经被读写成功。
-- **排查/调整：** 查目标文件、进程、时间与返回结果，将告警和自己的测试操作对齐。更换目标可修改本项目规则并重新部署；Falco 报警路径与 `policy.yaml` 的 BPF 保护路径是两份独立配置，改一份不会自动更新另一份。
+- **排查/调整：** 查目标文件、进程、时间与返回结果，将告警和自己的测试操作对齐。更换目标可修改本项目规则并重新部署。演示文件名称沿用历史名称，现在仅用于检测，不受本项目阻断保护。
 
 ## 五、怎样判断一条报警
 
@@ -730,7 +730,7 @@
 - **项目自带例外：** [95-security-stack-exceptions.yaml](../falco/rules.d/95-security-stack-exceptions.yaml) 只豁免相关 Falco 报警，不关闭 BPF 文件保护。本文提到的 `user_known_*` 多为调优入口，并不代表默认已配置业务白名单。
 - **安装路径：** `/etc/falco/falco.yaml` 的 `rules_files` 指向 `/etc/falco/security-stack/rules/<规则包ID>/official/`、`custom/` 等实际文件；额外主机规则、服务 `-r` 参数和优先级设置也可能改变实际加载效果。
 - **生效步骤：** 按 [规则指南](FALCO_RULES.md#4-自定义规则怎么添加) 校验并重新部署。不要只修改安装副本，也不要把 GitHub 页面更新理解为 Ubuntu 上自动更新。
-- **扣分而非检测：** [tsa/policy_config.yaml](../tsa/policy_config.yaml) 控制 TSA 评分。旧版没有 `falco_response` 告警后 kill 功能，不能照搬 `linux-iie` 的响应配置。
+- **扣分而非检测：** [tsa/policy_config.yaml](../tsa/policy_config.yaml) 控制 TSA 评分。评分配置不改变 Falco 检测条件，也不会触发阻断。
 
 ## 附录：12 条默认关闭规则
 

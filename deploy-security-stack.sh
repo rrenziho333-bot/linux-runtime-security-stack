@@ -1,190 +1,78 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [[ ${EUID} -ne 0 ]]; then
-  echo "Run this script with sudo." >&2
+if [[ ${EUID} -ne 0 || -z ${SUDO_USER:-} || ${SUDO_USER} == root ]]; then
+  echo "Run this script with sudo from an ordinary user account." >&2
   exit 1
 fi
-
 ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-GO_BIN="${GO_BIN:-/usr/local/go/bin/go}"
-if [[ -z ${SUDO_USER:-} || ${SUDO_USER} == root ]]; then
-  echo "Could not determine the runtime user: SUDO_USER is unset." >&2
-  echo "Run this script with: sudo ${0}" >&2
-  exit 1
-fi
-BUILD_USER="${SUDO_USER}"
 RUNTIME_USER="${SUDO_USER}"
 if [[ ! ${ROOT_DIR} =~ ^/[a-zA-Z0-9_./-]+$ ]]; then
-  echo "Use a checkout path containing only letters, digits, /, _, -, and . for systemd deployment." >&2
+  echo "Use a checkout path containing only letters, digits, /, _, -, and ." >&2
   exit 1
 fi
-BUILD_HOME="$(getent passwd "${BUILD_USER}" | cut -d: -f6)"
-BUILD_OUTPUT="${ROOT_DIR}/bpf-lsm-controller"
+RUNTIME_GROUP="$(id -gn "${RUNTIME_USER}")"
 TSA_DIR="${ROOT_DIR}/tsa"
-MAINTENANCE_DIR="/run/tsa-fusion"
-MAINTENANCE_FILE="${MAINTENANCE_DIR}/maintenance"
 
-if [[ -z ${BUILD_HOME} || ! -d ${BUILD_HOME} ]]; then
-  echo "Cannot determine home directory for build user ${BUILD_USER}." >&2
-  exit 1
+install -d -o root -g root -m 0755 /run/tsa-fusion
+install -o root -g root -m 0644 /dev/null /run/tsa-fusion/maintenance
+trap 'rm -f /run/tsa-fusion/maintenance' EXIT
+
+# Validate before changing the installed services.
+cd "${TSA_DIR}"
+runuser -u "${RUNTIME_USER}" -- python3 -m unittest discover -s tests -v
+cd "${ROOT_DIR}"
+python3 falco/manage_rules.py check
+
+# Upgrade from the former enforcement stack. Preserve logs, databases and
+# a root-only backup of installed components; stopping the service detaches LSM.
+if systemctl cat bpf-lsm-controller.service >/dev/null 2>&1; then
+  unit="$(systemctl cat bpf-lsm-controller.service)"
+  if [[ ${unit} != *"/usr/local/sbin/bpf-lsm-controller"* ]]; then
+    echo "Unrecognized legacy controller unit; inspect it before upgrading." >&2
+    exit 1
+  fi
+  backup="$(mktemp -d /var/backups/lrss-legacy-XXXXXXXX)"
+  for path in /etc/systemd/system/bpf-lsm-controller.service /usr/local/sbin/bpf-lsm-controller /etc/bpf-lsm/policy.yaml /etc/logrotate.d/bpf-lsm; do
+    if [[ -e ${path} ]]; then
+      cp -a --parents -- "${path}" "${backup}/"
+    fi
+  done
+  systemctl disable --now bpf-lsm-controller.service
+  if systemctl is-active --quiet bpf-lsm-controller.service; then
+    echo "Legacy controller is still active; deployment stopped." >&2
+    exit 1
+  fi
+  rm -f /etc/systemd/system/bpf-lsm-controller.service /usr/local/sbin/bpf-lsm-controller /etc/bpf-lsm/policy.yaml /etc/logrotate.d/bpf-lsm
+  echo "Legacy controller removed; backup: ${backup}. Historical logs and databases retained."
 fi
 
-install -d -o root -g root -m 0755 "${MAINTENANCE_DIR}"
-install -o root -g root -m 0644 /dev/null "${MAINTENANCE_FILE}"
-cleanup_maintenance() {
-  rm -f "${MAINTENANCE_FILE}"
-}
-trap cleanup_maintenance EXIT
-
-# Reload the already-installed TSA process before build/deployment activity so
-# it recognizes the maintenance marker using the current source code.
-if systemctl cat tsa-fusion.service >/dev/null 2>&1; then
-  systemctl restart tsa-fusion.service
+# The historical filename is a bounded alert test target, not a protected object.
+if [[ ! -e /etc/tsa-protected-demo && ! -L /etc/tsa-protected-demo ]]; then
+  install -o root -g root -m 0640 /dev/null /etc/tsa-protected-demo
 fi
+"${ROOT_DIR}/falco/deploy-host-falco.sh"
+install -D -o root -g root -m 0644 "${ROOT_DIR}/logrotate/falco-json" /etc/logrotate.d/falco-json
+install -d -o "${RUNTIME_USER}" -g "${RUNTIME_GROUP}" -m 0750 "${TSA_DIR}/state" "${TSA_DIR}/reports"
 
-run_as_builder() {
-  runuser -u "${BUILD_USER}" -- env \
-    HOME="${BUILD_HOME}" \
-    PATH="$(dirname -- "${GO_BIN}"):/usr/local/bin:/usr/bin:/bin" \
-    GOTOOLCHAIN="auto" \
-    GOPROXY="off" \
-    "$@"
-}
-
-# Render a template systemd unit (with __RUNTIME_USER__ / __SRC_DIR__
-# placeholders) into a temporary file using the actual runtime user and
-# project directory. The caller installs the returned temporary file.
-render_unit() {
-  local source_unit="$1"
-  local rendered
+for service in tsa-fusion tsa-dashboard; do
   rendered="$(mktemp)"
-  sed \
-    -e "s#__RUNTIME_USER__#${RUNTIME_USER}#g" \
-    -e "s#__SRC_DIR__#${ROOT_DIR}#g" \
-    -e "s#__BPF_LSM_MODE__#${BPF_LSM_MODE}#g" \
-    "${source_unit}" >"${rendered}"
+  sed -e "s#__RUNTIME_USER__#${RUNTIME_USER}#g" \
+      -e "s#__SRC_DIR__#${ROOT_DIR}#g" \
+      "${ROOT_DIR}/systemd/${service}.service" >"${rendered}"
   if grep -q '__[A-Z_]*__' "${rendered}"; then
     rm -f "${rendered}"
-    echo "Rendering ${source_unit} left unresolved placeholders." >&2
+    echo "Unresolved service placeholders." >&2
     exit 1
   fi
-  printf '%s' "${rendered}"
-}
-
-# Detect whether the running kernel supports BPF LSM. Falco's modern eBPF
-# driver (tracepoint/kprobe) does NOT require BPF LSM and still works when this
-# returns false; only bpf-lsm-controller's kernel-level enforcement needs it.
-bpf_lsm_available() {
-  [[ -r /sys/kernel/security/lsm ]] || return 1
-  grep -qw bpf /sys/kernel/security/lsm || return 1
-  return 0
-}
-
-if bpf_lsm_available; then
-  BPF_LSM_AVAILABLE=1
-  BPF_LSM_MODE=enabled
-else
-  BPF_LSM_AVAILABLE=0
-  BPF_LSM_MODE=disabled
-fi
-
-cd "${ROOT_DIR}"
-
-# Ensure the demo protected object exists on fresh machines. In full mode the
-# controller stats each policy path at startup (missing file aborts -check);
-# create it up front either way so a later switch to full mode needs no prep.
-DEMO_FILE="/etc/tsa-protected-demo"
-if [[ ! -e ${DEMO_FILE} ]]; then
-  install -o root -g root -m 0640 /dev/null "${DEMO_FILE}"
-  echo "Created demo protected file ${DEMO_FILE}."
-fi
-
-if [[ ${BPF_LSM_AVAILABLE} -eq 1 ]]; then
-  # Full mode: Go toolchain is required to build the bpf-lsm-controller binary.
-  if [[ ${GO_BIN} != /* || ! -x ${GO_BIN} ]]; then
-    echo "Full mode needs Go at ${GO_BIN}; install a version satisfying go.mod or set GO_BIN to its absolute path." >&2
-    exit 1
-  fi
-  run_as_builder "${GO_BIN}" test ./...
-  run_as_builder "${GO_BIN}" build -o "${BUILD_OUTPUT}" .
-  run_as_builder "${BUILD_OUTPUT}" -check -config "${ROOT_DIR}/policy.yaml"
-else
-  echo "Detection-only mode: skipping Go build and BPF controller (no Go needed)."
-fi
-
-# TSA is Python only; its tests run in both modes.
-(
-  cd "${TSA_DIR}"
-  runuser -u "${BUILD_USER}" -- python3 -m unittest discover -s tests -v
-)
-
-"${ROOT_DIR}/falco/deploy-host-falco.sh"
-
-install -D -o root -g root -m 0644 \
-  "${ROOT_DIR}/logrotate/falco-json" /etc/logrotate.d/falco-json
-
-install -d -o "${BUILD_USER}" -g "${BUILD_USER}" -m 0750 "${TSA_DIR}/state"
-install -d -o "${BUILD_USER}" -g "${BUILD_USER}" -m 0750 "${TSA_DIR}/reports"
-
-if [[ ${BPF_LSM_AVAILABLE} -eq 1 ]]; then
-  install -D -o root -g root -m 0755 \
-    "${BUILD_OUTPUT}" /usr/local/sbin/bpf-lsm-controller
-  install -D -o root -g root -m 0644 \
-    "${ROOT_DIR}/policy.yaml" /etc/bpf-lsm/policy.yaml
-  rendered_bpf_controller="$(render_unit "${ROOT_DIR}/systemd/bpf-lsm-controller.service")"
-  install -D -o root -g root -m 0644 \
-    "${rendered_bpf_controller}" /etc/systemd/system/bpf-lsm-controller.service
-  rm -f "${rendered_bpf_controller}"
-  install -D -o root -g root -m 0644 \
-    "${ROOT_DIR}/logrotate/bpf-lsm" /etc/logrotate.d/bpf-lsm
-  install -d -o root -g adm -m 0750 /var/log/bpf-lsm
-else
-  # Degraded mode: kernel has no BPF LSM. Keep the controller from being
-  # installed/enabled, and tell TSA not to watch the (non-existent) BPF event
-  # log so the fusion pipeline runs on Falco only.
-  echo "BPF LSM not available on this kernel — deploying in detection-only mode."
-  echo "  (bpf-lsm-controller is skipped; Falco + TSA + dashboard remain active.)"
-  if systemctl cat bpf-lsm-controller.service >/dev/null 2>&1; then
-    systemctl disable --now bpf-lsm-controller.service
-  fi
-fi
-
-rendered_tsa_fusion="$(render_unit "${ROOT_DIR}/systemd/tsa-fusion.service")"
-install -D -o root -g root -m 0644 \
-  "${rendered_tsa_fusion}" /etc/systemd/system/tsa-fusion.service
-rm -f "${rendered_tsa_fusion}"
-rendered_tsa_dashboard="$(render_unit "${ROOT_DIR}/systemd/tsa-dashboard.service")"
-install -D -o root -g root -m 0644 \
-  "${rendered_tsa_dashboard}" /etc/systemd/system/tsa-dashboard.service
-rm -f "${rendered_tsa_dashboard}"
-
-# Stop a temporary foreground dashboard used during development so the
-# managed service can bind its loopback port cleanly.
-pkill -u "${BUILD_USER}" -f \
-  "^python3 ${TSA_DIR}/tsa_dashboard.py .*--port 8766$" || true
-
+  install -D -o root -g root -m 0644 "${rendered}" "/etc/systemd/system/${service}.service"
+  rm -f "${rendered}"
+done
 systemctl daemon-reload
-if [[ ${BPF_LSM_AVAILABLE} -eq 1 ]]; then
-  systemctl enable bpf-lsm-controller.service
-  systemctl restart bpf-lsm-controller.service
-fi
-systemctl enable tsa-fusion.service
-systemctl enable tsa-dashboard.service
-systemctl restart tsa-fusion.service
-systemctl restart tsa-dashboard.service
+systemctl enable tsa-fusion.service tsa-dashboard.service
+systemctl restart tsa-fusion.service tsa-dashboard.service
+systemctl --no-pager --full status falco-modern-bpf.service tsa-fusion.service tsa-dashboard.service
 
-if [[ ${BPF_LSM_AVAILABLE} -eq 1 ]]; then
-  systemctl --no-pager --full status bpf-lsm-controller.service
-fi
-systemctl --no-pager --full status tsa-fusion.service
-systemctl --no-pager --full status tsa-dashboard.service
-
-echo
-if [[ ${BPF_LSM_AVAILABLE} -eq 1 ]]; then
-  echo "Security stack deployed. BPF LSM uses the modes configured in policy.yaml."
-else
-  echo "Security stack deployed in DETECTION-ONLY mode (no BPF LSM enforcement)."
-fi
-echo "Dashboard: http://127.0.0.1:8766/ (loopback only; use SSH forwarding or an authenticated TLS proxy)"
-echo "Risk score API: GET http://127.0.0.1:8766/systemManage/risk/score"
+echo "Detection-only stack deployed: Falco + Lynis + TSA. No blocking or process termination."
+echo "Dashboard: http://127.0.0.1:8766/ (loopback only)"
+echo "Risk score API: http://127.0.0.1:8766/systemManage/risk/score"

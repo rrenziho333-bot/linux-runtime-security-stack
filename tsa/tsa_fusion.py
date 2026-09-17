@@ -2,8 +2,7 @@
 """TSA entry point.
 
 TSA consumes Falco JSON alerts and a Lynis report, then maintains a durable
-host posture/runtime risk score. It never changes kernel enforcement policy
-directly; enforcement requests belong to a separate privileged controller.
+host posture/runtime risk score. It never blocks operations or kills processes.
 """
 
 import argparse
@@ -26,8 +25,6 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Run the baseline scan, write a report, and exit",
     )
-    parser.add_argument("--bpf-lsm", choices=("configured", "enabled", "disabled"),
-                        default="configured", help="Override the BPF event source for this run")
     return parser.parse_args()
 
 
@@ -39,8 +36,7 @@ def main() -> int:
         datefmt="%Y-%m-%dT%H:%M:%S%z",
     )
 
-    override = None if args.bpf_lsm == "configured" else args.bpf_lsm == "enabled"
-    agent = TSAFusionAgent(args.config, bpf_lsm_enabled=override)
+    agent = TSAFusionAgent(args.config)
     signal.signal(signal.SIGINT, agent.request_stop)
     signal.signal(signal.SIGTERM, agent.request_stop)
 
