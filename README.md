@@ -4,6 +4,7 @@ Falco 发现可疑行为，BPF LSM 审计或阻断受保护文件操作，TSA �
 
 - 首次安装与验收：[Ubuntu 复现指南](docs/INSTALL.md)
 - 规则位置与自定义：[Falco 规则指南](docs/FALCO_RULES.md)
+- 每条规则的含义与排查：[82 条启用规则解析](docs/FALCO_RULES_README.md)
 
 ## 工作流程
 

@@ -1,5 +1,7 @@
 # Falco 规则指南
 
+逐条触发条件、正常业务场景与排查方法见 [82 条启用规则解析](FALCO_RULES_README.md)。
+
 ## 1. clone 下来的规则在哪里
 
 **git clone 只下载文件，不会启动检测。** 首次部署按 [INSTALL.md](INSTALL.md) 操作。
