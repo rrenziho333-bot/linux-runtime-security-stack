@@ -92,6 +92,11 @@ def main():
         if not falco:
             print("未找到本次 PID 的写入告警；检查 Falco 服务、规则和 PID 输出配置。")
         return 1
+    except subprocess.CalledProcessError as error:
+        print("FAIL：测试写入命令执行失败；请在可输入 sudo 密码的 Ubuntu 终端运行。")
+        if error.stderr:
+            print(error.stderr.strip())
+        return 1
     except (OSError, ValueError, sqlite3.Error, subprocess.SubprocessError) as error:
         print(f"FAIL：{error}")
         return 1

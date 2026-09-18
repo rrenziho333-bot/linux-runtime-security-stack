@@ -4,11 +4,12 @@ import errno
 import io
 import json
 import os
+import subprocess
 import tempfile
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
-from verify_runtime import evaluate, write_demo
+from verify_runtime import evaluate, main, write_demo
 
 
 class VerificationTests(unittest.TestCase):
@@ -25,6 +26,23 @@ class VerificationTests(unittest.TestCase):
             self.assertFalse(evaluate(rows, attempt)[0])
         for outcome in ("error", "denied"):
             self.assertFalse(evaluate([self.falco], {"pid": 77, "outcome": outcome})[0])
+
+    @unittest.skipUnless(os.name == "posix", "Ubuntu verification entry point")
+    def test_sudo_failure_explains_cause_without_reporting_success(self):
+        with tempfile.TemporaryDirectory() as folder:
+            target = Path(folder) / "demo"
+            target.write_text("original")
+            data = MagicMock()
+            data._connect.return_value.execute.return_value.fetchone.return_value = (0,)
+            output = io.StringIO()
+            error = subprocess.CalledProcessError(1, ["sudo"], stderr="sudo: a terminal is required")
+            with patch("verify_runtime.TARGET", target), patch("verify_runtime.DashboardData", return_value=data), \
+                    patch("verify_runtime.subprocess.run", side_effect=error), \
+                    patch("sys.argv", ["verify_runtime.py"]), contextlib.redirect_stdout(output):
+                self.assertEqual(main(), 1)
+            self.assertIn("sudo: a terminal is required", output.getvalue())
+            self.assertNotIn("PASS", output.getvalue())
+            self.assertEqual(target.read_text(), "original")
 
     @unittest.skipUnless(os.name == "posix", "Linux file flags")
     def test_denied_write_is_not_retried_by_a_buffered_stream(self):

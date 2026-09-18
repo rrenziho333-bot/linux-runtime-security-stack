@@ -1,9 +1,10 @@
 # Ubuntu 复现指南
 
 适用 Ubuntu 22.04 x86_64、systemd、可 sudo 的普通用户。建议虚拟机 2 核、4 GB 内存，操作前做快照。
+在 Ubuntu 的普通用户终端逐条执行；提示 sudo 密码时输入该用户密码。项目放在用户家目录，路径不要含空格或中文；需要能访问 Ubuntu 软件源、Falco 软件源和 GitHub。
 本项目只做 **Lynis 基线检测 + Falco 告警 + TSA 评分**，不阻断、不终止进程；无需安装 Go 或启用 BPF LSM。
 
-2026-09-17 已在 iie-os 的 Ubuntu 22.04、6.8 内核、Falco 0.44.1 上验证旧版迁移、62 项回归测试及真实告警入库。这是已有虚拟机上的部署验证，不是本轮新装裸机或全部规则攻击实测。
+2026-09-18 已在 VMware 全新 Ubuntu Server 22.04.5（官方云镜像、5.15.0-190 内核、2 核/4 GB）逐条执行本指南：从 GitHub 克隆，安装 Falco 0.44.1、Lynis 3.0.7，63 项回归测试、真实写入告警入库、评分、网页及重启恢复均通过。未沿用旧虚拟机的配置或数据，也未启用 BPF LSM；不代表所有 Ubuntu 版本或全部规则攻击实测。
 
 ## 1. 准备依赖
 
@@ -22,7 +23,7 @@ sudo apt-get install -y ca-certificates curl gnupg git python3-yaml jq lynis log
 test -r /sys/kernel/btf/vmlinux && echo "BTF OK" || echo "BTF MISSING"
 ```
 
-Ubuntu 22.04 通常已有可用内核。BTF 缺失或 Falco 提示内核不支持时，安装 `linux-generic-hwe-22.04` 并重启后重试；**不修改 GRUB 的 LSM 配置**。
+BTF OK 是初步检查，最终以第 4 节真实告警验收为准。BTF 缺失或 Falco 提示内核不支持时，安装 `linux-generic-hwe-22.04` 并重启后重试；**不修改 GRUB 的 LSM 配置**。
 
 APT 出现 403 时先修复对应软件源；第三方源握手失败应修复网络或临时禁用该源，不要关闭签名或 TLS 验证。
 
@@ -106,7 +107,7 @@ sudo chmod 0640 tsa/reports/lynis-report.dat
 sudo ./deploy-security-stack.sh
 ```
 
-部署会运行测试、安装仓库规则并启动服务。Lynis 不是常驻服务，TSA 默认只读报告；报告一天后过期，重新执行 3.5～3.8 并重启 TSA。
+部署会运行测试、安装仓库规则并启动服务。Lynis 不是常驻服务；报告一天后过期，重新执行 3.5～3.8，再执行 `sudo systemctl restart tsa-fusion`。
 
 ## 4. 验收
 
@@ -134,7 +135,7 @@ python3 tsa/verify_runtime.py
 curl --fail --noproxy '*' http://127.0.0.1:8766/systemManage/risk/score
 ```
 
-在 **Ubuntu 浏览器**打开 `http://127.0.0.1:8766/`。Windows 访问需通过已有 SSH 连接转发，勿直接开放看板端口。
+在 **Ubuntu 浏览器**打开 `http://127.0.0.1:8766/`。没有图形桌面时使用下方 SSH 转发，勿直接开放看板端口。分数随主机配置和告警变化，不要求固定数值；SSH 登录等正常活动也可能命中规则，需结合证据判断。
 
 **命令 4.5（排障）：查看日志。**
 ```bash
@@ -142,6 +143,13 @@ journalctl -u falco-modern-bpf -u tsa-fusion -u tsa-dashboard -n 80 --no-pager
 ```
 
 服务 active 不是完整验收；还要看到本次 Falco 告警入库与有效评分。此测试不代表所有规则逐条攻击验证。
+
+**命令 4.6（可选，Windows 终端）：Ubuntu 已启用 SSH 时转发看板。将 USER、UBUNTU_IP 替换为实际用户名和地址。**
+```bash
+ssh -N -L 127.0.0.1:18768:127.0.0.1:8766 USER@UBUNTU_IP
+```
+
+保持该终端打开，在 Windows 浏览器访问 `http://127.0.0.1:18768/`；查看 4.3 的事件链接时也将端口改为 `18768`。
 
 ## 5. 更新与配置
 

@@ -104,7 +104,9 @@ systemctl daemon-reload
 
 falco --dry-run
 
-systemctl disable --now falco-logger.service || true
+if systemctl cat falco-logger.service >/dev/null 2>&1; then
+  systemctl disable --now falco-logger.service
+fi
 
 # The earlier container deployment installed a real falco.service file. Falco's
 # packaged modern eBPF unit declares falco.service as an alias, so the old file
