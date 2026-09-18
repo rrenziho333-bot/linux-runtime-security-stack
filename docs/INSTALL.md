@@ -4,7 +4,7 @@
 在 Ubuntu 的普通用户终端逐条执行；提示 sudo 密码时输入该用户密码。项目放在用户家目录，路径不要含空格或中文；需要能访问 Ubuntu 软件源、Falco 软件源和 GitHub。
 本项目只做 **Lynis 基线检测 + Falco 告警 + TSA 评分**，不阻断、不终止进程；无需安装 Go 或启用 BPF LSM。
 
-2026-09-18 已在 VMware 全新 Ubuntu Server 22.04.5（官方云镜像、5.15.0-190 内核、2 核/4 GB）逐条执行本指南：从 GitHub 克隆，安装 Falco 0.44.1、Lynis 3.0.7，63 项回归测试、真实写入告警入库、评分、网页及重启恢复均通过。未沿用旧虚拟机的配置或数据，也未启用 BPF LSM；不代表所有 Ubuntu 版本或全部规则攻击实测。
+2026-09-18 已在 VMware 全新 Ubuntu Server 22.04.5（官方云镜像、5.15.0-190 内核、2 核/4 GB）逐条执行本指南：从 GitHub 克隆，安装 Falco 0.44.1、Lynis 3.0.7，66 项回归测试、真实写入告警入库、评分、网页及重启恢复均通过。未沿用旧虚拟机的配置或数据，也未启用 BPF LSM；不代表所有 Ubuntu 版本或全部规则攻击实测。
 
 ## 1. 准备依赖
 
@@ -111,7 +111,7 @@ sudo ./deploy-security-stack.sh
 
 ## 4. 验收
 
-部署返回后等待约 10 秒，在同一个终端继续即可。
+部署返回后，在同一个终端继续；健康检查会重试等待采集初始化。
 
 **命令 4.1：三个服务均应输出 active。**
 ```bash
@@ -120,8 +120,10 @@ systemctl is-active falco-modern-bpf tsa-fusion tsa-dashboard
 
 **命令 4.2：健康接口应返回 {"status":"ok"}。**
 ```bash
-curl --fail --noproxy '*' http://127.0.0.1:8766/healthz
+curl --fail --retry 12 --retry-delay 2 --retry-connrefused --noproxy '*' http://127.0.0.1:8766/healthz
 ```
+
+重试后仍失败，先查看 4.5 的日志，不继续验收。部署会预建空日志，安静的主机无需先触发报警才能就绪。
 
 **命令 4.3：真实触发一次文件写入告警。**
 ```bash

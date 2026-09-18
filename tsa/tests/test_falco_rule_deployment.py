@@ -1,5 +1,6 @@
 import importlib.util
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -17,6 +18,40 @@ SPEC.loader.exec_module(rules)
 
 
 class RuleDeploymentTests(unittest.TestCase):
+    def prepare_log(self, directory):
+        patch.stopall()
+        script = SCRIPT.with_name('deploy-host-falco.sh').read_text(encoding='utf-8')
+        block = 'FALCO_LOG=' + script.split('FALCO_LOG=', 1)[1].split(
+            'install -d -o root -g root -m 0755 /etc/falco/config.d', 1)[0]
+        # Unit tests run unprivileged; real root:adm ownership is checked in VM.
+        program = 'set -eu\nchown() { :; }\nFALCO_OUT_DIR="$1"\n' + block
+        return subprocess.run(['bash', '-c', program, 'prepare-log', str(directory)],
+                              capture_output=True, text=True, timeout=10)
+
+    @unittest.skipUnless(os.name == 'posix', 'Linux deployment')
+    def test_log_initialized_before_first_alert_without_truncating_evidence(self):
+        log = self.root / 'falco.json'
+        self.assertEqual(self.prepare_log(self.root).returncode, 0)
+        self.assertEqual(log.read_bytes(), b'')
+        self.assertEqual(log.stat().st_mode & 0o777, 0o640)
+        log.write_text('existing evidence\n')
+        inode = log.stat().st_ino
+        self.assertEqual(self.prepare_log(self.root).returncode, 0)
+        self.assertEqual(log.read_text(), 'existing evidence\n')
+        self.assertEqual(log.stat().st_ino, inode)
+
+    @unittest.skipUnless(os.name == 'posix', 'Linux deployment')
+    def test_log_initialization_refuses_symlinks_and_directories(self):
+        target = self.root / 'other'
+        target.write_text('do not change')
+        log = self.root / 'falco.json'
+        log.symlink_to(target)
+        self.assertNotEqual(self.prepare_log(self.root).returncode, 0)
+        self.assertEqual(target.read_text(), 'do not change')
+        log.unlink()
+        log.mkdir()
+        self.assertNotEqual(self.prepare_log(self.root).returncode, 0)
+
     def test_output_enrichment_preserves_host_fields_and_adds_process_identity(self):
         patch.stopall()  # This test runs the renderer, not the mocked Falco CLI.
         script = SCRIPT.with_name('deploy-host-falco.sh').read_text(encoding='utf-8')

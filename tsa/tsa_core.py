@@ -600,6 +600,9 @@ class RotatingLineReader:
         try:
             stat = self.path.stat()
         except FileNotFoundError:
+            # Only skip history that already exists when watching begins.
+            # A file created after this point contains new events, not history.
+            self.start_at_end = False
             return False
 
         identity = f"{stat.st_dev}:{stat.st_ino}"

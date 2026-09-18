@@ -71,6 +71,17 @@ class SecurityTests(unittest.TestCase):
             restarted.acknowledge()
         self.assertGreater(agent.store.get("falco_log.offset"), 0)
 
+    def test_missing_log_then_first_alert_is_not_skipped(self):
+        path = self.root / "falco.json"
+        reader = RotatingLineReader(path, self.agent().store, start_at_end=True)
+        self.addCleanup(reader.close)
+        self.assertIsNone(reader.readline())
+        line = json.dumps(self.event) + "\n"
+        path.write_text(line, encoding="utf-8")
+        self.assertEqual(reader.readline(), line)
+        reader.acknowledge()
+        self.assertIsNone(reader.readline())
+
     def test_cursor_and_event_rollback_together(self):
         (self.root / "falco.json").write_text(json.dumps(self.event) + "\n", encoding="utf-8")
         agent = self.agent()

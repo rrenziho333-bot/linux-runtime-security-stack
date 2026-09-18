@@ -30,6 +30,15 @@ python3 "${SCRIPT_DIR}/manage_rules.py" install
 # form. #3 is a systemd drop-in overriding UMask/Group on the falco unit.
 FALCO_OUT_DIR="/var/log/falco"
 install -d -o root -g adm -m 2750 "${FALCO_OUT_DIR}"
+# Create the stream before TSA starts; Falco may not open it until an alert.
+FALCO_LOG="${FALCO_OUT_DIR}/falco.json"
+if [[ -L ${FALCO_LOG} || ( -e ${FALCO_LOG} && ! -f ${FALCO_LOG} ) ]]; then
+  echo "Falco output must be a regular file, not a symlink: ${FALCO_LOG}" >&2
+  exit 1
+fi
+touch -- "${FALCO_LOG}"
+chown root:adm -- "${FALCO_LOG}"
+chmod 0640 -- "${FALCO_LOG}"
 install -d -o root -g root -m 0755 /etc/falco/config.d
 
 python3 - "${FALCO_CONFIG}" > /etc/falco/config.d/zz-security-stack-output.yaml <<'PY'
