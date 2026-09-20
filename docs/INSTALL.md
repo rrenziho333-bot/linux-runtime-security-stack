@@ -176,11 +176,12 @@ Lynis 仍执行适用于本机的系统检查；不是只检查下表。TSA 从 
 | AUTH-9283：无密码账号 | warning | 25 |
 | AUTH-9216：组文件一致性 | warning，需复核 grpck 错误 | 10 |
 | PKGS-7392：安全更新 | warning，不等同已确认可利用漏洞 | 15 |
-| SSH-7408：SSH 配置 | `details[]` 中 PermitRootLogin=YES / StrictModes=NO / IgnoreRhosts=NO / PermitUserEnvironment=YES | 15 / 15 / 10 / 5，取最高 |
+| SSH-7408：SSH 配置 | `details[]` 中 PermitRootLogin=YES / StrictModes=NO / PermitUserEnvironment=YES | 15 / 15 / 5，取最高 |
+| SSH-7408：IgnoreRhosts=NO | 缺少 HostbasedAuthentication 上下文，无法确认用户信任文件是否生效 | 0，仅提示 |
 | AUTH-9262：PAM 密码强度模块 | suggestion；外部统一认证主机可配置为 0 | 5 |
-| AUTH-9328 / KRNL-5820 / LOGG-2190 / FIRE-4513 / BOOT-5122 | umask / core dump / 已删除但仍打开文件 / 未命中防火墙规则 / 引导密码，需结合场景审查 | 0，仅提示 |
+| AUTH-9328 / KRNL-5820 / LOGG-2190 / FIRE-4513 / BOOT-5122 / NETW-3200 | umask / core dump / 已删除但仍打开文件 / 未命中防火墙规则 / 引导密码 / 网络协议，需结合场景审查 | 0，仅提示 |
 
-其他检查项默认只展示、不自动扣分；SSH 缺少结构化证据时不猜测配置值。分值是可调整的项目风险权重，不是 Lynis 官方分值、等保/CIS 合规分或入侵概率。100 只表示本策略没有可计分发现，不表示所有检查通过。
+其他检查项默认只展示、不自动扣分；SSH 缺少结构化证据时不猜测配置值。基线分 = 100 - 各检查项扣分之和（最低 0）。例如 PKGS-7392 扣 15 分，基线就是 85；15 表示本项目对安全更新缺口的重视程度，不是 15% 的入侵概率，也不随软件包数量增加。分值是项目策略，不是 Lynis 官方分、等保/CIS 合规分；100 只表示没有可计分发现，不表示所有检查通过。
 
 **查看依据：**看板“基线检查与扣分明细”，或 `GET /systemManage/risk/baseline`。包括原文、建议、扣分、执行/跳过记录、报告时间和报告列出的风险软件包/账号；不按软件包或账号数量累加扣分，软件包列表也不等于已验证的 CVE。证据同时保存在 `tsa/reports/last_scan.json` 的 `baseline` 中。
 

@@ -18,7 +18,7 @@
 | `Clear Log Activities` | 10 | 4 小时 | 日志清理，需核对维护任务 |
 | `Create Symlink Over Sensitive Files` | 5 | 1 小时 | 敏感路径软链接变更 |
 | `Create Hardlink Over Sensitive Files` | 5 | 1 小时 | 敏感路径硬链接变更 |
-| `Linux Kernel Module Injection Detected` | 10 | 4 小时 | 内核模块加载，需核对驱动维护 |
+| `Linux Kernel Module Injection Detected` | 10 | 4 小时 | 具有 SYS_MODULE 能力的容器加载内核模块，需核对授权维护 |
 | `PTRACE attached to process` | 5 | 1 小时 | 进程附加调试，可能为合法调试 |
 | `Execution from /dev/shm` | 10 | 4 小时 | 共享内存目录执行 |
 | `Fileless execution via memfd_create` | 15 | 4 小时 | 内存文件执行，仍需核对合法运行时 |
@@ -26,24 +26,26 @@
 | `Write below binary dir` | 10 | 4 小时 | 系统程序写打开 |
 | `Write below monitored dir` | 10 | 4 小时 | 启动、库和关键目录写打开 |
 | `Modify binary dirs` | 10 | 4 小时 | 系统程序删除或重命名 |
-| `Detect crypto miners using the Stratum protocol` | 15 | 4 小时 | 挖矿地址参数特征，不代表已确认挖矿 |
+| `Detect crypto miners using the Stratum protocol` | 10 | 4 小时 | 命令行包含 Stratum 地址，未验证连接或实际挖矿 |
 | `Netcat/Socat Remote Code Execution on Host` | 15 | 4 小时 | 网络工具执行命令特征 |
-| `Known Cryptominer Process Executed` | 15 | 4 小时 | 矿工名称特征，需核对程序来源 |
+| `Known Cryptominer Process Executed` | 5 | 4 小时 | 仅进程名匹配矿工名单，未验证文件身份或挖矿行为 |
 | `Modify Shell Configuration File` | 5 | 1 小时 | Shell 启动配置变更 |
 | `Set Setuid or Setgid bit` | 10 | 4 小时 | SUID 或 SGID 权限变更 |
 | `Adding ssh keys to authorized_keys` | 10 | 4 小时 | SSH 持久访问凭据变更 |
 | `Run shell untrusted` | 10 | 4 小时 | 非预期进程启动 Shell |
-| `Remove Bulk Data from Disk` | 10 | 4 小时 | 批量删除命令特征，需核对清理任务 |
+| `Remove Bulk Data from Disk` | 5 | 4 小时 | 仅 shred/mkfs/mke2fs 启动，未确认参数或数据删除 |
 | `Web Server Spawned Shell` | 15 | 4 小时 | Web 进程链启动 Shell |
 | `Web Server Spawned Suspicious Child Process` | 10 | 4 小时 | Web 进程链启动可疑工具 |
 | `Reverse Shell from Web Server` | 20 | 24 小时 | Web 进程链反向 Shell 字符串特征 |
 | `Sudo Potential Privilege Escalation` | 15 | 4 小时 | sudo 可疑参数，不确认漏洞利用成功 |
-| `Polkit Local Privilege Escalation Vulnerability (CVE-2021-4034)` | 10 | 4 小时 | pkexec 可疑启动形态，不检查补丁状态 |
-| `Potential Local Privilege Escalation via Environment Variables Misuse` | 10 | 4 小时 | 提权相关环境变量特征 |
+| `Polkit Local Privilege Escalation Vulnerability (CVE-2021-4034)` | 5 | 4 小时 | 非 root 登录会话中无参数 pkexec，未确认载荷、补丁状态或提权 |
+| `Potential Local Privilege Escalation via Environment Variables Misuse` | 5 | 4 小时 | 环境包含 GLIBC_TUNABLES 字样，正常调优也会命中 |
 | `Delete or rename shell history` | 5 | 1 小时 | 历史记录删除或重命名 |
 | `Monitor specific file access` | 1 | 15 分钟 | 演示文件验收信号，不代表真实入侵 |
 
 同一规则当前只取未过期证据的最高风险值，重复报警只续期；不同规则分别计分，运行时分最低为 0。撤下的规则不再贡献当前风险，历史证据不删除。过期只代表离开观察窗口，不代表已完成处置。priority 和 MITRE 标签不再自动决定分值；未配置规则仅记录。
+
+分档用于安排排查优先级，不是统计验证的入侵概率。单个操作可能命中不同规则，当前会分别计分，不能把它们当作独立攻击次数。降低配置分值后，当前风险按新值封顶，历史扣分记录不改写；本次调整不改变证据有效期。
 
 低噪声不等于全面安全：容器、Kubernetes、云元数据、RPM 场景默认关闭；代理环境、普通 UDP、用户管理、基础查询等宽泛行为也不纳入默认计分。正常驱动安装、调试、登录组件仍可能触发保留规则，需核对证据后设置窄范围例外，不按进程名整体放行。
 

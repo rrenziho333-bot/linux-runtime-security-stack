@@ -74,7 +74,7 @@ class BaselineScoringTests(unittest.TestCase):
     def test_ssh_requires_structured_field_and_exact_value(self):
         for field, value, expected in [('Port', '22', 0), ('PermitRootLogin', 'PROHIBIT-PASSWORD', 0),
                                         ('PermitRootLogin', 'YES', 15), ('StrictModes', 'NO', 15),
-                                        ('IgnoreRhosts', 'NO', 10), ('PermitUserEnvironment', 'YES', 5)]:
+                                        ('IgnoreRhosts', 'NO', 0), ('PermitUserEnvironment', 'YES', 5)]:
             with self.subTest(field=field, value=value):
                 result = self.score('suggestion[]=SSH-7408|Consider hardening SSH|text|-\n'
                                     f'details[]=SSH-7408|sshd|desc:sshd option;field:{field};value:{value};|\n')
@@ -82,6 +82,35 @@ class BaselineScoringTests(unittest.TestCase):
         result = self.score('suggestion[]=SSH-7408|PermitRootLogin YES, ambiguous text|-|-\n')
         self.assertEqual(result['score'], 100)
         self.assertEqual(self.control(result, 'SSH-7408')['status'], 'finding')
+
+    def test_rhosts_without_authentication_context_is_advisory_not_a_pass(self):
+        result = self.score('details[]=SSH-7408|sshd|field:IgnoreRhosts;value:NO;|\n')
+        ssh = self.control(result, 'SSH-7408')
+        self.assertEqual(result['score'], 100)
+        self.assertEqual(ssh['status'], 'finding')
+        self.assertEqual(ssh['matched_details'][0]['points'], 0)
+        self.assertIn('HostbasedAuthentication', ssh['matched_details'][0]['reason'])
+        self.assertEqual(ssh['matched_details'][0]['evidence']['value'], 'NO')
+
+    def test_protocol_suggestions_preserve_evidence_without_multiplying_penalty(self):
+        result = self.score(''.join(f'suggestion[]=NETW-3200|Review {protocol}|-|-\n'
+                                   for protocol in ('dccp', 'sctp', 'rds', 'tipc')))
+        control = self.control(result, 'NETW-3200')
+        self.assertEqual(result['score'], 100)
+        self.assertEqual(control['status'], 'finding')
+        self.assertEqual(len(control['findings']), 4)
+        self.assertEqual(control['deducted_points'], 0)
+        self.assertNotEqual(control['title'], 'NETW-3200')
+
+    def test_many_packages_are_one_patch_management_gap_not_many_vulnerabilities(self):
+        for count in (1, 396):
+            with self.subTest(count=count):
+                result = self.score('warning[]=PKGS-7392|Security updates|-|-\n'
+                                    + ''.join(f'vulnerable_package[]=package-{n}\n' for n in range(count)))
+                self.assertEqual(result['score'], 85)
+                self.assertEqual(result['deducted_points'], 15)
+                self.assertEqual(len(result['observations']['vulnerable_packages']), count)
+                self.assertEqual(result['policy_version'], 'ubuntu-host-v3')
 
     def test_multiple_ssh_findings_use_peak_not_sum(self):
         result = self.score('details[]=SSH-7408|sshd|field:PermitRootLogin;value:YES;|\n'

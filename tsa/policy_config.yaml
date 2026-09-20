@@ -1,6 +1,6 @@
 meta:
   policy_id: "tsa-fusion-v1"
-  version: "3.0.0"
+  version: "3.1.0"
 
 storage:
   state_db: "state/tsa.db"
@@ -34,7 +34,7 @@ baseline_lynis:
 
   # Project risk weights, not Lynis hardening points or a compliance score.
   # All findings remain visible. Each control contributes its maximum once.
-  policy_version: "ubuntu-host-v2"
+  policy_version: "ubuntu-host-v3"
   require_execution_metadata: true
   required_controls: [AUTH-9204, AUTH-9283, PKGS-7392]
   controls:
@@ -53,14 +53,14 @@ baseline_lynis:
     PKGS-7392:
       title: "待安装的安全更新"
       warning: 15
-      reason: "Lynis 的 APT 安全更新检查报告风险；不代表已证实可利用的 CVE"
+      reason: "发现待安装安全更新，按补丁管理缺口固定扣 15 分；不按软件包数量累加，不代表已确认可利用的 CVE"
     SSH-7408:
       title: "SSH 安全配置"
       reason: "只按 details 中明确的危险值计分；同项取最高值，端口 22 等建议不扣分"
       detail_matches:
         - {field: PermitRootLogin, values: ["YES"], points: 15, reason: "未在该选项限制 root 登录方式，需结合其他认证设置复核"}
         - {field: StrictModes, values: ["NO"], points: 15, reason: "关闭 SSH 用户文件权限检查"}
-        - {field: IgnoreRhosts, values: ["NO"], points: 10, reason: "允许使用用户级 rhosts 信任文件，风险取决于其他认证设置"}
+        - {field: IgnoreRhosts, values: ["NO"], points: 0, reason: "仅在主机认证启用时影响用户信任文件；报告缺少 HostbasedAuthentication 上下文，保留提示供复核，不自动扣分"}
         - {field: PermitUserEnvironment, values: ["YES"], points: 5, reason: "允许用户注入 SSH 会话环境，需核对受限会话策略"}
     AUTH-9262:
       title: "PAM 密码强度模块"
@@ -81,6 +81,9 @@ baseline_lynis:
     BOOT-5122:
       title: "引导加载器密码"
       reason: "取决于物理访问和虚拟化管理边界，默认仅提示"
+    NETW-3200:
+      title: "网络协议加固建议"
+      reason: "协议是否需要取决于业务用途；建议禁用不等于已发现可利用漏洞，默认仅提示"
 
 # --- 2. 动态运行时监控 (Runtime: Falco) ---
 
@@ -132,7 +135,7 @@ runtime_rules:
     "Linux Kernel Module Injection Detected":
       points: 10
       risk_ttl_seconds: 14400
-      reason: "内核模块加载，需核对驱动维护"
+      reason: "具有 SYS_MODULE 能力的容器加载内核模块，需核对授权维护；不是任意主机驱动安装"
     "PTRACE attached to process":
       points: 5
       risk_ttl_seconds: 3600
@@ -162,17 +165,17 @@ runtime_rules:
       risk_ttl_seconds: 14400
       reason: "系统程序删除或重命名"
     "Detect crypto miners using the Stratum protocol":
-      points: 15
+      points: 10
       risk_ttl_seconds: 14400
-      reason: "挖矿地址参数特征，不代表已确认挖矿"
+      reason: "命令行包含 Stratum 地址特征，比单纯进程名更具体；未验证网络连接或实际挖矿，记 10 分"
     "Netcat/Socat Remote Code Execution on Host":
       points: 15
       risk_ttl_seconds: 14400
       reason: "网络工具执行命令特征"
     "Known Cryptominer Process Executed":
-      points: 15
+      points: 5
       risk_ttl_seconds: 14400
-      reason: "矿工名称特征，需核对程序来源"
+      reason: "仅进程名匹配矿工名单，未验证文件身份或挖矿行为；作为待核实线索记 5 分"
     "Modify Shell Configuration File":
       points: 5
       risk_ttl_seconds: 3600
@@ -190,9 +193,9 @@ runtime_rules:
       risk_ttl_seconds: 14400
       reason: "非预期进程启动 Shell"
     "Remove Bulk Data from Disk":
-      points: 10
+      points: 5
       risk_ttl_seconds: 14400
-      reason: "批量删除命令特征，需核对清理任务"
+      reason: "仅发现 shred、mkfs 或 mke2fs 启动，未确认执行参数或数据删除；作为待核实线索记 5 分"
     "Web Server Spawned Shell":
       points: 15
       risk_ttl_seconds: 14400
@@ -210,13 +213,13 @@ runtime_rules:
       risk_ttl_seconds: 14400
       reason: "sudo 可疑参数，不确认漏洞利用成功"
     "Polkit Local Privilege Escalation Vulnerability (CVE-2021-4034)":
-      points: 10
+      points: 5
       risk_ttl_seconds: 14400
-      reason: "pkexec 可疑启动形态，不检查补丁状态"
+      reason: "非 root 登录会话启动无参数 pkexec，未确认恶意载荷、补丁状态或提权成功；作为待核实线索记 5 分"
     "Potential Local Privilege Escalation via Environment Variables Misuse":
-      points: 10
+      points: 5
       risk_ttl_seconds: 14400
-      reason: "提权相关环境变量特征"
+      reason: "执行环境包含 GLIBC_TUNABLES 字样，合法调优也会触发；未验证变量值或 glibc 漏洞，记 5 分"
     "Delete or rename shell history":
       points: 5
       risk_ttl_seconds: 3600

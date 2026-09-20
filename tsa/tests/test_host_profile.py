@@ -78,6 +78,50 @@ class HostProfileTests(unittest.TestCase):
         self.scorer.refresh_runtime_score(self.now + 3670)
         self.assertEqual(self.scorer.runtime_score, 100)
 
+    def test_name_environment_and_argument_only_signals_are_low_weight(self):
+        rules = ('Known Cryptominer Process Executed', 'Remove Bulk Data from Disk',
+                 'Polkit Local Privilege Escalation Vulnerability (CVE-2021-4034)',
+                 'Potential Local Privilege Escalation via Environment Variables Misuse')
+        for rule in rules:
+            with self.subTest(rule=rule):
+                self.store.db.execute('DELETE FROM events')
+                self.store.db.commit()
+                result = self.emit(rule)
+                self.assertEqual(result['deducted_points'], 5)
+                self.assertEqual(self.scorer.runtime_score, 95)
+                self.assertEqual(self.emit(rule, pid=11)['deducted_points'], 0)
+                self.assertEqual(self.scorer.runtime_score, 95)
+
+    def test_protocol_arguments_rank_above_names_below_combined_web_shell_signal(self):
+        specific = self.config['runtime_rules']['specific_rules']
+        self.assertEqual(specific['Detect crypto miners using the Stratum protocol']['points'], 10)
+        self.assertLess(specific['Known Cryptominer Process Executed']['points'], 10)
+        self.assertEqual(specific['Reverse Shell from Web Server']['points'], 20)
+
+    def test_lower_weights_apply_to_old_active_risk_without_rewriting_history(self):
+        rule = 'Known Cryptominer Process Executed'
+        old_config = copy.deepcopy(self.config)
+        old_config['runtime_rules']['specific_rules'][rule]['points'] = 15
+        old_scorer = RiskScorer(old_config, self.store)
+        old_scorer.process_falco_event(self.event(rule), received_at=self.now)
+        self.assertEqual(old_scorer.runtime_score, 85)
+        updated = RiskScorer(self.config, self.store)
+        updated.refresh_runtime_score(self.now)
+        self.assertEqual(updated.runtime_score, 95)
+        row = self.store.db.execute('SELECT deducted_points, risk_points, risk_expires_at FROM events').fetchone()
+        self.assertEqual((row['deducted_points'], row['risk_points']), (15, 15))
+        self.assertAlmostEqual(row['risk_expires_at'], self.now + 14400, places=5)
+        data = object.__new__(DashboardData)
+        data.config = self.config
+        with patch('tsa_dashboard.time.time', return_value=self.now):
+            scores = data._scores(self.store.db, {'posture_score': 85, 'baseline_status': 'ok'})
+        self.assertEqual(scores, {'runtime': 95, 'posture': 85, 'final': 91})
+
+    def test_documented_runtime_weights_match_deployed_configuration(self):
+        text = (ROOT / 'docs/FALCO_RULES_README.md').read_text(encoding='utf-8')
+        for rule, policy in self.config['runtime_rules']['specific_rules'].items():
+            self.assertIn(f'| `{rule}` | {policy["points"]} |', text)
+
     def test_different_rules_add_and_full_high_risk_is_not_minute_truncated(self):
         self.assertEqual(self.emit('Reverse Shell from Web Server')['deducted_points'], 20)
         self.assertEqual(self.emit('Read sensitive file untrusted')['deducted_points'], 5)
