@@ -22,6 +22,7 @@ import yaml
 
 from weight_policy import read_policy, final_score as weighted_score
 from baseline_scoring import baseline_snapshot, read_report, score_report
+from runtime_context import advisory_reason, apply_signal_budget
 
 
 LOG = logging.getLogger(__name__)
@@ -61,12 +62,32 @@ def runtime_risk_breakdown(
     weight = "COALESCE(risk_points, deducted_points)" if peak and "risk_points" in columns else "deducted_points"
     aggregate = "MAX" if peak else "SUM"
     statuses = "'scored', 'risk_refreshed'" if peak else "'scored'"
-    rows = db.execute(
-        f"SELECT rule_name, {aggregate}({weight}) points, COUNT(*) evidence_count, "
-        f"MAX(risk_expires_at) expires_at FROM events WHERE source='falco' "
-        f"AND status IN ({statuses}) AND {weight} > 0 AND risk_expires_at > ? "
-        "GROUP BY rule_name ORDER BY points DESC, rule_name", (now,)
-    ).fetchall()
+    if peak and runtime_cfg.get('context_advisories') and 'payload' in columns:
+        # Re-evaluate active historical evidence without rewriting its audit record.
+        merged = {}
+        for row in db.execute(
+            f"SELECT rule_name, {weight} points, risk_expires_at, payload FROM events WHERE source='falco' "
+            f"AND status IN ({statuses}) AND {weight} > 0 AND risk_expires_at > ?", (now,)
+        ):
+            try:
+                evidence = json.loads(row['payload'])
+            except (TypeError, ValueError):
+                evidence = {}
+            if isinstance(evidence, dict) and advisory_reason(row['rule_name'], evidence, runtime_cfg):
+                continue
+            group = merged.setdefault(row['rule_name'], {'rule_name': row['rule_name'], 'points': 0,
+                                                         'evidence_count': 0, 'expires_at': 0})
+            group['points'] = max(group['points'], row['points'])
+            group['evidence_count'] += 1
+            group['expires_at'] = max(group['expires_at'], row['risk_expires_at'])
+        rows = list(merged.values())
+    else:
+        rows = db.execute(
+            f"SELECT rule_name, {aggregate}({weight}) points, COUNT(*) evidence_count, "
+            f"MAX(risk_expires_at) expires_at FROM events WHERE source='falco' "
+            f"AND status IN ({statuses}) AND {weight} > 0 AND risk_expires_at > ? "
+            "GROUP BY rule_name ORDER BY points DESC, rule_name", (now,)
+        ).fetchall()
     specific = runtime_cfg.get("specific_rules", {}) or {}
     result = []
     for row in rows:
@@ -74,7 +95,7 @@ def runtime_risk_breakdown(
         if runtime_cfg.get("unmapped_rule_action") == "record_only" and name not in specific:
             continue
         policy = specific.get(name)
-        if isinstance(policy, Mapping) and not policy.get("enabled", True):
+        if isinstance(policy, Mapping) and (not policy.get("enabled", True) or policy.get('test_only', False)):
             continue
         points = max(0, int(row["points"] or 0))
         if cap:
@@ -85,7 +106,7 @@ def runtime_risk_breakdown(
             result.append({"rule": name, "points": points,
                            "evidence_count": row["evidence_count"], "expires_at": row["expires_at"],
                            "reason": policy.get("reason", "") if isinstance(policy, Mapping) else ""})
-    return result
+    return apply_signal_budget(result, runtime_cfg) if peak else result
 
 
 class StateStore:
@@ -534,6 +555,11 @@ class RiskScorer:
         tags = [tag for tag in tags if isinstance(tag, str)] if isinstance(tags, list) else []
         output_fields = event.get("output_fields", {}) or {}
         output_fields = output_fields if isinstance(output_fields, Mapping) else {}
+        evidence = {key: output_fields.get(field) for key, field in {
+            'process': 'proc.name', 'executable': 'proc.exepath', 'parent': 'proc.pname',
+            'command': 'proc.cmdline', 'file': 'fd.name', 'uid': 'user.uid',
+            'container_id': 'container.id', 'syscall': 'evt.type',
+            'is_open_write': 'evt.is_open_write', 'syscall_result': 'evt.rawres'}.items()}
         event_key = self._event_key(rule, output_fields)
         risk_ttl_seconds = 0
         risk_points = None
@@ -571,14 +597,25 @@ class RiskScorer:
                     reason += "; event risk already expired before ingestion"
                 elif risk_points > 0:
                     self.store.set("runtime_valid_time_at", now)
-                    active = runtime_risk_breakdown(self.store.db, runtime_cfg, now)
-                    before = sum(item["points"] for item in active)
-                    previous = next((item["points"] for item in active if item["rule"] == rule), 0)
-                    cap = int((runtime_cfg.get("event_control", {}) or {}).get("max_active_points_per_rule", 20))
-                    contribution = min(risk_points, cap) if cap > 0 else risk_points
-                    after = before - previous + max(previous, contribution)
-                    admitted = min(100, after) - min(100, before)
-                    status = "scored" if admitted else "risk_refreshed"
+                    raw_policy = (runtime_cfg.get('specific_rules', {}) or {}).get(rule, {})
+                    context = advisory_reason(rule, evidence, runtime_cfg)
+                    if isinstance(raw_policy, Mapping) and raw_policy.get('test_only', False):
+                        status, admitted, expires_at = 'test_event', 0, None
+                        reason += '; 专用验收规则，只在独立测试中计算分数，不计入实际风险'
+                    elif context:
+                        status, admitted, expires_at = 'context_advisory', 0, None
+                        reason = context
+                    else:
+                        active = runtime_risk_breakdown(self.store.db, runtime_cfg, now)
+                        before = sum(item["points"] for item in active)
+                        previous = next((item.get('rule_points', item['points']) for item in active if item["rule"] == rule), 0)
+                        cap = int((runtime_cfg.get("event_control", {}) or {}).get("max_active_points_per_rule", 20))
+                        contribution = min(risk_points, cap) if cap > 0 else risk_points
+                        projected = [item for item in active if item['rule'] != rule]
+                        projected.append({'rule': rule, 'points': max(previous, contribution)})
+                        after = sum(item['points'] for item in apply_signal_budget(projected, runtime_cfg))
+                        admitted = max(0, min(100, after) - min(100, before))
+                        status = "scored" if admitted else "risk_refreshed"
             else:
                 risk_ttl_seconds = policy.risk_ttl_seconds
                 admitted, status, count = self.store.admit_points(

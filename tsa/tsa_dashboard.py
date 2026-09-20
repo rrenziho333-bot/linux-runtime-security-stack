@@ -24,6 +24,7 @@ from urllib.parse import parse_qs, urlparse
 import yaml
 
 from tsa_core import parse_event_time, runtime_risk_breakdown
+from runtime_context import advisory_reason
 from baseline_scoring import baseline_snapshot
 from weight_policy import read_policy, update_policy, VersionConflict, final_score as weighted_score
 
@@ -112,7 +113,7 @@ const $=s=>document.querySelector(s);
 const localZone=Intl.DateTimeFormat().resolvedOptions().timeZone||"UTC";
 const timeKinds={falco_event:"Falco 发生时间",tsa_received:"TSA 入库时间"};
 const sourceNames={falco:"Falco"};
-const statusNames={scored:"已计分",risk_refreshed:"风险续期，不叠加扣分",expired:"过期证据，不扣分",invalid_time:"时间异常，不扣分",duplicate:"去重，不重复扣分",rate_limited:"限速，不扣分",maintenance:"维护，不扣分",maintenance_reclassified:"维护，不扣分",whitelisted:"白名单，不扣分",ignored:"不计分"};
+const statusNames={scored:"已计分",risk_refreshed:"风险续期或预算封顶，不新增扣分",context_advisory:"系统读取上下文，仅提示",test_event:"验收事件，不计实际风险",expired:"过期证据，不扣分",invalid_time:"时间异常，不扣分",duplicate:"去重，不重复扣分",rate_limited:"限速，不扣分",maintenance:"维护，不扣分",maintenance_reclassified:"维护，不扣分",whitelisted:"白名单，不扣分",ignored:"不计分"};
 const ruleNames={"Program run with disallowed http proxy env":"进程使用未允许的代理环境","Write below etc":"写入 /etc 下的文件","Monitor specific file access":"打开演示文件","Read sensitive file untrusted":"程序读取敏感文件（未列入规则例外）","Non sudo setuid":"非 sudo 程序切换用户身份"};
 let current=null,eventSignature="",baselineSignature="",pending=false,timer=null,before=0;
 const initial=new URLSearchParams(location.search);
@@ -147,6 +148,7 @@ function renderEvidence(source,item){
     el("div","subline","TSA 入库："+formatTime(item.received_time)),el("div","subline",(statusNames[item.status]||item.status)+" · 历史扣分 "+item.deducted_points));
   if(item.risk_expires_at)row.append(el("div","subline","计分到期："+formatTime(new Date(item.risk_expires_at*1000).toISOString())));
   if(item.reason)row.append(el("div","subline","依据："+item.reason));
+  if(item.current_policy_note)row.append(el("div","subline","当前策略："+item.current_policy_note+"；历史记录保持原样"));
   if(item.risk_points!=null)row.append(el("div","subline","规则风险值："+item.risk_points+" · 本次新增扣分："+item.deducted_points));
   if(item.file)row.append(el("div","subline","文件："+item.file));
   if(item.command)row.append(el("div","subline","命令："+item.command));
@@ -199,7 +201,7 @@ function render(){
   else{
     const total=current.runtime_risks.reduce((n,r)=>n+r.points,0);
     risk.append(el("div","evidence-row","规则风险合计 "+total+"，运行时评分 "+Math.max(0,100-total)));
-    current.runtime_risks.forEach(r=>{const row=el("div","evidence-row");row.append(el("strong","",r.rule+" · −"+r.points),el("div","subline",r.reason),el("div","subline",r.evidence_count+" 条有效证据 · 最晚到期："+formatTime(new Date(r.expires_at*1000).toISOString())));risk.append(row)});
+    current.runtime_risks.forEach(r=>{const row=el("div","evidence-row");row.append(el("strong","",r.rule+" · 当前贡献 −"+r.points),el("div","subline",r.reason),el("div","subline",r.evidence_count+" 条有效证据 · 最晚到期："+formatTime(new Date(r.expires_at*1000).toISOString())));if(r.budget_limit!=null)row.append(el("div","subline","规则风险值 "+r.rule_points+"；"+r.budget_reason+"。按风险值从高到低分配，相同时按规则名排序。"));risk.append(row)});
   }
   $("#refresh").textContent="页面刷新："+formatTime(current.generated_time);
   $("#zone-label").textContent="显示时区："+zone();
@@ -334,6 +336,13 @@ class DashboardData:
                 payload = {"malformed_payload": row["payload"]}
             if not isinstance(payload, dict):
                 payload = {"malformed_payload": payload}
+            runtime = self.config.get('runtime_rules', {}) or {}
+            note = advisory_reason(row['rule_name'], payload, runtime)
+            policy = (runtime.get('specific_rules', {}) or {}).get(row['rule_name'], {})
+            if isinstance(policy, dict) and policy.get('test_only'):
+                note = '专用验收规则，不计实际风险'
+            if note:
+                payload['current_policy_note'] = note
             events.append(
                 {
                     **payload,
@@ -403,7 +412,9 @@ class DashboardData:
         points = int(event.get("deducted_points", 0))
         labels = {
             "scored": f"TSA 已接收并计入风险：-{points} 分",
-            "risk_refreshed": "TSA 已接收：同规则风险续期，不叠加扣分（或总扣分已达 100）",
+            "risk_refreshed": "TSA 已接收：同规则续期、弱线索预算或总分封顶，不新增扣分",
+            "context_advisory": "符合已配置的系统读取上下文；保留证据，不计入实际风险",
+            "test_event": "专用验收事件；保留证据，不计入实际风险",
             "expired": "TSA 已接收：事件在入库前已过计分有效期，仅保留证据",
             "invalid_time": "TSA 已接收：事件时间异常，未计分；请检查主机时钟和日志格式",
             "duplicate": "TSA 已接收：命中去重窗口，不重复扣分",

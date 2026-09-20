@@ -28,6 +28,8 @@ class HostProfileTests(unittest.TestCase):
         self.store = StateStore(Path(self.temp.name) / 'state.db')
         self.addCleanup(self.store.close)
         self.config = copy.deepcopy(CONFIG)
+        # Generic timing/accounting tests exercise an explicitly scored demo policy.
+        self.config['runtime_rules']['specific_rules']['Monitor specific file access']['test_only'] = False
         self.scorer = RiskScorer(self.config, self.store)
         self.now = time.time()
 

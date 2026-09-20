@@ -2,19 +2,21 @@
 """Write only the existing demo file, then locate this attempt's durable evidence."""
 
 import argparse
+import copy
 import errno
 import json
 import os
 import sqlite3
 import stat
 import subprocess
+import tempfile
 import time
 import uuid
 from contextlib import closing
 from pathlib import Path
 
 from tsa_dashboard import DashboardData
-from tsa_core import parse_event_time
+from tsa_core import RiskScorer, StateStore, parse_event_time
 
 
 TARGET = Path("/etc/tsa-protected-demo")
@@ -70,6 +72,30 @@ def check_probe_times(events, started, finished):
                 "再重新验收。虚拟机挂起恢复后尤其需要检查；不要延长告警有效期来绕过此错误。")
 
 
+def score_test_evidence(config, event):
+    """Replay captured demo evidence in a disposable database, not the live score."""
+    isolated = copy.deepcopy(config)
+    isolated['runtime_rules']['specific_rules'][RULE]['test_only'] = False
+    fields = {field: event.get(key) for key, field in {
+        'pid': 'proc.pid', 'process': 'proc.name', 'file': 'fd.name',
+        'is_open_write': 'evt.is_open_write', 'syscall': 'evt.type'}.items()}
+    alert = {'rule': RULE, 'time': event['event_time'], 'priority': event.get('priority', 'WARNING'),
+             'output_fields': fields}
+    with tempfile.TemporaryDirectory(prefix='lrss-isolated-score-') as directory:
+        store = StateStore(Path(directory) / 'test.db')
+        try:
+            scorer = RiskScorer(isolated, store)
+            first = scorer.process_falco_event(alert)
+            score = scorer.runtime_score
+            second = scorer.process_falco_event(alert)
+            expected = isolated['runtime_rules']['specific_rules'][RULE]['points']
+            if first['deducted_points'] != expected or score != 100 - expected or second['deducted_points'] != 0:
+                raise ValueError('独立测试计分或重复去重不符合策略')
+            return score
+        finally:
+            store.close()
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--write-demo", nargs=3, help=argparse.SUPPRESS)
@@ -117,8 +143,15 @@ def main():
             after_snapshot = data.snapshot()
             risks = after_snapshot['runtime_risks']
             active = next((r['points'] for r in risks if r['rule'] == RULE), None)
-            expected = data.config['runtime_rules']['specific_rules'][RULE]['points']
-            if not any(e['rule'] == RULE for e in falco) or active != expected:
+            policy = data.config['runtime_rules']['specific_rules'][RULE]
+            expected = policy['points']
+            matching = [e for e in falco if e['rule'] == RULE]
+            if policy.get('test_only'):
+                if not matching or active is not None or any(e['status'] != 'test_event' or e['deducted_points'] != 0 for e in matching):
+                    raise ValueError('验收事件未与实际评分隔离')
+                isolated_score = score_test_evidence(data.config, matching[0])
+                print(f'独立验收运行时分：100 → {isolated_score}；重复证据不再次扣分。')
+            elif not matching or active != expected:
                 raise ValueError(f'验收规则未正确计分：期望 {expected}，实际 {active}')
             if not after_snapshot['availability']['ready']:
                 raise ValueError('测试后评分不可用：' + after_snapshot['availability']['reason'])
@@ -128,7 +161,7 @@ def main():
             prior = next((r['points'] for r in before['runtime_risks'] if r['rule'] == RULE), 0)
             print('测试前分数：' + json.dumps(before['scores'], ensure_ascii=False))
             print('测试后分数：' + json.dumps(scores, ensure_ascii=False))
-            print(f'本规则当前风险：{prior} → {active} 分；重复触发仅续期，其他并发告警可能影响总分。')
+            print(f'本规则实际风险：{prior} → {active or 0} 分；其他并发告警可能影响总分。')
             print("PASS：真实写入、同 PID 告警、规则风险值和运行时总分对账一致（不代表完整攻击覆盖）。")
             return 0
         print("FAIL：结果或证据不完整；不要仅凭服务 active 判断成功。")

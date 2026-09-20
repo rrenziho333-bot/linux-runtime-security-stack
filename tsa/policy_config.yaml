@@ -1,6 +1,6 @@
 meta:
   policy_id: "tsa-fusion-v1"
-  version: "3.1.0"
+  version: "3.2.0"
 
 storage:
   state_db: "state/tsa.db"
@@ -100,6 +100,55 @@ runtime_rules:
   aggregation: peak_per_rule
   unmapped_rule_action: record_only
   event_time_scoring: true
+  signal_budget:
+    max_points: 15
+    reason: "名称、环境变量和启动参数属于弱线索，合计最多 15 分；不限制其他敏感行为规则"
+    rules:
+      - "Known Cryptominer Process Executed"
+      - "Remove Bulk Data from Disk"
+      - "Polkit Local Privilege Escalation Vulnerability (CVE-2021-4034)"
+      - "Potential Local Privilege Escalation via Environment Variables Misuse"
+      - "Detect crypto miners using the Stratum protocol"
+  # Exact, successful, read-only host/root contexts. Never exempt by process name alone.
+  context_advisories:
+    - rule: "Directory traversal monitored file read"
+      reason: "符合 VMware 挂起/恢复脚本读取自身配置的上下文，保留告警供复核，不扣分；不证明程序未被利用"
+      match:
+        uid: [0]
+        container_id: [host]
+        executable: [/usr/bin/dash]
+        parent: [resume-vm-defau, suspend-vm-defa]
+        command:
+          - "network -x /etc/vmware-tools/scripts/vmware/network resume-vm"
+          - "network -x /etc/vmware-tools/scripts/vmware/network suspend-vm"
+        file: [/etc/vmware-tools/statechange.subr]
+    - rule: "Read sensitive file untrusted"
+      reason: "符合系统 VMware Tools 的认证读取上下文，保留告警供复核，不扣分"
+      match:
+        uid: [0]
+        container_id: [host]
+        executable: [/usr/bin/vmtoolsd]
+        parent: [systemd]
+        command: [vmtoolsd]
+        file: [/etc/pam.d/vmtoolsd, /etc/pam.d/common-auth, /etc/pam.d/common-account, /etc/pam.d/common-password, /etc/pam.d/common-session, /etc/pam.d/other, /etc/shadow]
+    - rule: "Read sensitive file untrusted"
+      reason: "符合 GDM 登录会话的认证读取上下文，保留告警供复核，不扣分"
+      match:
+        uid: [0]
+        container_id: [host]
+        executable: [/usr/libexec/gdm-session-worker]
+        parent: [gdm-session-wor]
+        command: [gdm-session-wor]
+        file: [/etc/pam.d/gdm-password, /etc/pam.d/common-auth, /etc/pam.d/common-account, /etc/pam.d/common-password, /etc/pam.d/common-session, /etc/pam.d/other, /etc/shadow]
+    - rule: "Read sensitive file untrusted"
+      reason: "符合 Ubuntu 更新通知程序的固定权限检查上下文，保留告警供复核，不扣分"
+      match:
+        uid: [0]
+        container_id: [host]
+        executable: [/usr/bin/pkexec]
+        parent: [update-notifier]
+        command: ["pkexec /usr/lib/update-notifier/package-system-locked"]
+        file: [/etc/pam.d/polkit-1, /etc/pam.d/common-auth, /etc/pam.d/common-account, /etc/pam.d/common-password, /etc/pam.d/common-session, /etc/pam.d/common-session-noninteractive, /etc/pam.d/other]
   event_control:
     dedup_window: 60
     max_points_per_minute: 0
@@ -226,5 +275,6 @@ runtime_rules:
       reason: "历史记录删除或重命名"
     "Monitor specific file access":
       points: 1
+      test_only: true
       risk_ttl_seconds: 900
-      reason: "演示文件验收信号，不代表真实入侵"
+      reason: "专用演示文件，独立验收计 1 分，实际风险不扣分"
