@@ -9,7 +9,7 @@ import tempfile
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from verify_runtime import evaluate, main, write_demo
+from verify_runtime import RULE, check_probe_times, evaluate, main, write_demo
 
 
 class VerificationTests(unittest.TestCase):
@@ -26,6 +26,24 @@ class VerificationTests(unittest.TestCase):
             self.assertFalse(evaluate(rows, attempt)[0])
         for outcome in ("error", "denied"):
             self.assertFalse(evaluate([self.falco], {"pid": 77, "outcome": outcome})[0])
+
+    def test_live_probe_accepts_fresh_nanosecond_evidence(self):
+        check_probe_times([{'rule': RULE, 'event_time': '2026-01-01T00:00:00.123456789Z'}],
+                          1767225600, 1767225601)
+
+    def test_live_probe_rejects_old_or_future_timestamps_even_if_risk_is_active(self):
+        for timestamp in ('2025-12-31T21:39:00Z', '2026-01-01T00:01:00Z'):
+            with self.subTest(timestamp=timestamp), self.assertRaisesRegex(ValueError, 'restart falco-modern-bpf'):
+                check_probe_times([{'rule': RULE, 'event_time': timestamp}], 1767225600, 1767225601)
+
+    def test_live_probe_rejects_missing_and_naive_event_time(self):
+        for timestamp in ('', None, '2026-01-01T00:00:00'):
+            with self.subTest(timestamp=timestamp), self.assertRaisesRegex(ValueError, '有效事件时间'):
+                check_probe_times([{'rule': RULE, 'event_time': timestamp}], 1767225600, 1767225601)
+
+    def test_live_probe_rejects_wall_clock_rollback(self):
+        with self.assertRaisesRegex(ValueError, '时间回退'):
+            check_probe_times([], 1767225601, 1767225600)
 
     @unittest.skipUnless(os.name == "posix", "Ubuntu verification entry point")
     def test_sudo_failure_explains_cause_without_reporting_success(self):

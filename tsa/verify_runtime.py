@@ -14,6 +14,7 @@ from contextlib import closing
 from pathlib import Path
 
 from tsa_dashboard import DashboardData
+from tsa_core import parse_event_time
 
 
 TARGET = Path("/etc/tsa-protected-demo")
@@ -51,6 +52,24 @@ def evaluate(events, attempt):
     return attempt["outcome"] == "written" and bool(falco), falco
 
 
+def check_probe_times(events, started, finished):
+    """A known, just-executed probe must not be mistaken for historical backlog."""
+    if finished < started:
+        raise ValueError("测试期间系统时间回退；校时后重新执行验收")
+    for event in events:
+        if event.get("rule") != RULE:
+            continue
+        try:
+            timestamp = parse_event_time(event.get("event_time", ""))
+        except (ValueError, TypeError):
+            raise ValueError("本次 Falco 证据缺少有效事件时间，无法验收") from None
+        if not started - 5 <= timestamp <= finished + 5:
+            raise ValueError(
+                f"本次 Falco 事件时间与实际操作不符（相对操作开始偏差 {timestamp - started:+.1f} 秒）。"
+                "先用 timedatectl 检查系统时间；校时后执行 sudo systemctl restart falco-modern-bpf，"
+                "再重新验收。虚拟机挂起恢复后尤其需要检查；不要延长告警有效期来绕过此错误。")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--write-demo", nargs=3, help=argparse.SUPPRESS)
@@ -74,7 +93,9 @@ def main():
         token = "lrss-verify-" + uuid.uuid4().hex[:12]
         command = ([] if os.geteuid() == 0 else ["sudo"]) + [
             "/usr/bin/python3", str(Path(__file__).resolve()), "--write-demo", token, str(info.st_dev), str(info.st_ino)]
+        started = time.time()
         completed = subprocess.run(command, text=True, capture_output=True, timeout=90, check=True)
+        finished = time.time()
         attempt = json.loads(completed.stdout)
         print(f"测试编号：{token} | PID：{attempt['pid']} | 文件：{TARGET}")
         print("实际写入结果：" + {"written": "成功", "denied": "EPERM 拒绝", "error": "失败"}[attempt["outcome"]])
@@ -92,6 +113,7 @@ def main():
         for event in falco:
             print(f"{event['source']} #{event['id']} | {event['rule']} | {event['status']} | 历史扣分 {event['deducted_points']}")
         if success:
+            check_probe_times(falco, started, finished)
             after_snapshot = data.snapshot()
             risks = after_snapshot['runtime_risks']
             active = next((r['points'] for r in risks if r['rule'] == RULE), None)

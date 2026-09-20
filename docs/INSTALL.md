@@ -137,6 +137,8 @@ echo "manual-score-test-$(date +%s)" | sudo tee -a /etc/tsa-protected-demo
 
 其他进程可能同时触发规则或风险到期，因此总分变化未必恰好是 1；以脚本的“本规则当前风险”和网页逐规则明细对账。总分已到 0 时不能继续下降。不要删除数据库或修改报告时间来制造满分。
 
+若 4.3 提示“事件时间与实际操作不符”（可能出现在虚拟机挂起恢复后），先用 `timedatectl` 确认系统时间正确，再执行 `sudo systemctl restart falco-modern-bpf` 并重试 4.3；不要关闭事件过期检查。
+
 ## 5. 更新与配置
 
 在原 Ubuntu 项目目录内：
