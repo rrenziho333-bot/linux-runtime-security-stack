@@ -28,7 +28,22 @@ def rule_count(data):
     entries = yaml.safe_load(data)
     if not isinstance(entries, list):
         raise ValueError('A rule file must contain a YAML list')
-    return sum(isinstance(entry, dict) and 'rule' in entry for entry in entries)
+    return sum(isinstance(entry, dict) and 'rule' in entry and 'override' not in entry for entry in entries)
+
+
+def enabled_bundle_rules(bundle):
+    """Resolve project enabled flags in load order, excluding host extras/filters."""
+    enabled = {}
+    order = ['official/' + name for name in OFFICIAL]
+    order += sorted(name for name in bundle if name.startswith('custom/'))
+    for name in order:
+        for entry in yaml.safe_load(bundle[name]):
+            if isinstance(entry, dict) and 'rule' in entry:
+                rule = entry['rule']
+                if 'override' in entry and rule not in enabled:
+                    raise ValueError('Override of unknown rule: ' + rule)
+                enabled[rule] = entry.get('enabled', enabled.get(rule, True))
+    return {name for name, active in enabled.items() if active}
 
 
 def lock_rules(source):
@@ -135,6 +150,7 @@ def install_rules(source, config_path, target, falco='falco', check=False):
     if config_path.is_symlink():
         raise ValueError('The managed Falco config must not be a symlink')
     bundle = load_bundle(source)
+    enabled = enabled_bundle_rules(bundle)
     original = config_path.read_bytes()
     config = yaml.safe_load(original)
     if not isinstance(config, dict) or not isinstance(config.get('rules_files'), list):
@@ -186,7 +202,8 @@ def install_rules(source, config_path, target, falco='falco', check=False):
     print('Rule bundle:', bundle_id(bundle))
     print('Official rule definitions:', sum(rule_count(v) for k, v in bundle.items() if k.startswith('official/')))
     print('Custom rule definitions:', sum(rule_count(v) for k, v in bundle.items() if k.startswith('custom/')))
-    print('Definitions are not an enabled-rule count; enabled flags and Falco filters still apply.')
+    print('Enabled project rules after overrides:', len(enabled))
+    print('Host extras, service arguments and Falco filters may change effective coverage.')
     print('Managed rules location:', release)
     print('Preserved host rule paths:', json.dumps(extras))
     print('Check passed; no installed files changed.' if check else 'Rules installed; restart Falco to activate.')

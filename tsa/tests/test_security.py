@@ -172,7 +172,7 @@ class SecurityTests(unittest.TestCase):
         self.mark_ready(agent.store)
         self.assertIsNone(agent.run_posture_scan())
         self.assertIsNone(agent.scorer.posture_score)
-        with self.assertRaisesRegex(ValueError, "baseline"):
+        with self.assertRaisesRegex(ValueError, "基线不可用"):
             DashboardData(self.config_path).scores()
 
     @patch("tsa_dashboard.service_state", return_value="active")

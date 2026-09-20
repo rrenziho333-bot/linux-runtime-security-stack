@@ -4,7 +4,8 @@
 
 - [Ubuntu 安装与验收](docs/INSTALL.md)
 - [规则位置与自定义](docs/FALCO_RULES.md)
-- [82 条启用规则分类与解析](docs/FALCO_RULES_README.md)
+- [30 条默认规则、分值与完整规则解析](docs/FALCO_RULES_README.md)
+- [主系统对接：查询分数、设置权重](docs/INSTALL.md#6-主系统对接)
 
 ## 工作流程
 
@@ -22,13 +23,16 @@ Falco 使用 modern eBPF 采集系统调用，不需要本项目原有的 BPF LS
 
 ## 部署与评分
 
-支持 Ubuntu 22.04 x86_64。按安装指南准备依赖、克隆、生成 Lynis 报告并部署，`git clone` 本身不会启动服务。
+支持 Ubuntu 22.04 x86_64。按安装指南准备依赖、克隆并部署，部署自动生成 Lynis 报告；`git clone` 本身不会启动服务。
 
-**全新系统复现已验证（2026-09-18）**：VMware 中的 Ubuntu Server 22.04.5 官方云镜像，默认 5.15.0-190 内核，Falco 0.44.1。按指南从 GitHub 克隆完成部署，66 项回归测试通过，真实文件写入告警入库、评分 API、网页和重启自启动均正常。不需要 Go、BPF LSM 或修改 GRUB；其他系统环境及全部规则攻击覆盖不在本次验证范围内。
+**当前版本验证（2026-09-20）**：在 2IIE-OS 的 Ubuntu 22.04.5（6.8.0-60 内核、Falco 0.44.1）通过 120 项回归、真实自动扫描、TSA 不重启接收新报告、演示告警首次扣 1 分与重复不叠加验证。9 月 18 日还完成了项目级清理部署、3 条规则真实触发、权重接口、服务重启与故障恢复。不是新装裸机验证，也未逐条触发全部 30 条规则。
+
+上一版 `17037ca` 已在全新 Ubuntu Server 22.04.5 云镜像（5.15.0-190 内核）完成克隆部署和重启验证；该结论不替代当前版本的全新系统验证。不需要 Go、BPF LSM 或修改 GRUB。
 
 - 看板：`http://127.0.0.1:8766/`；评分：`GET /systemManage/risk/score`。远程使用 SSH 转发，不直接开放端口。
 - 默认综合分 = 基线分 × 40% + 运行时分 × 60%，越低风险越高。基线分按选定 Lynis 项扣分，不等于 Lynis 原始 hardening index。
-- Falco 事件支持去重、限额、每规则封顶和风险到期；历史扣分不等于当前总分变化。基线过期或采集异常时评分不可用。
+- 主系统通过认证接口设置权重、查询三个分数并展示；综合分统一由 TSA 计算。0.4/0.6 仅为初始默认值，接口设置持久保存、立即生效，评分响应包含实际权重及版本。
+- 同规则有效风险取峰值，不按报警次数叠加；重复报警保留证据并续期。分值及有效期逐条配置，不按 priority 自动扣分；历史扣分不等于当前总分变化。基线过期或采集异常时评分不可用。
 - 从旧版升级须重新执行部署脚本：停用并备份移除旧控制器，保留历史数据，旧 BPF 事件不再参与评分。
 
 ## 代码与配置
@@ -38,13 +42,16 @@ Falco 使用 modern eBPF 采集系统调用，不需要本项目原有的 BPF LS
 | `deploy-security-stack.sh` | 部署入口：测试、安装规则、迁移旧服务并启动 |
 | `falco/manage_rules.py`、`falco/deploy-host-falco.sh` | 校验安装规则，配置 Falco 日志与服务 |
 | `falco/official-rules/`、`falco/rules.lock.json` | 固定官方规则快照与完整性校验 |
-| `falco/rules.d/` | 演示规则、自定义入口和组件告警例外 |
+| `falco/rules.d/` | 默认规则开关、演示规则、自定义入口和组件告警例外 |
 | `tsa/tsa_fusion.py`、`tsa/tsa_core.py` | TSA 启动入口、基线读取、事件计分和 SQLite 持久化 |
-| `tsa/tsa_dashboard.py` | 只读网页、健康接口、评分 API |
+| `tsa/baseline_scoring.py` | Lynis 证据解析、逐检查项计分、执行覆盖与报告有效期 |
+| `tsa/refresh_baseline.py`、`systemd/tsa-baseline.*` | root 定时扫描、验证并原子发布统一基线报告 |
+| `tsa/tsa_dashboard.py` | 只读网页、健康和评分 API、认证权重管理 API |
+| `tsa/weight_policy.py` | 权重校验、持久化、版本历史与综合分统一计算 |
 | `tsa/policy_config.yaml` | 评分、权重、数据路径及有效期 |
 | `tsa/verify_runtime.py` | 真实文件操作与 Falco 入库验证 |
 | `systemd/`、`logrotate/`、`tsa/tests/` | 服务、日志轮转、回归测试 |
 
-官方规则共 93 条定义：81 条默认启用、12 条默认关闭；加上 1 条项目规则，共 82 条默认启用定义。匹配告警不等于确认入侵，也不保证覆盖所有攻击。
+默认启用 30 条主机告警及计分规则（29 条官方规则 + 1 条验收规则）。`falco/rules.d/89-host-profile.yaml` 选择官方规则，`tsa/policy_config.yaml` 指定分值和有效期；其余定义保留但关闭，不覆盖完整容器/云平台场景。匹配告警不等于确认入侵。
 
-日志为 `/var/log/falco/falco.json`；数据库为 `tsa/state/tsa.db`；基线和评分报告在 `tsa/reports/`。运行数据不提交 Git。Lynis 默认手动审计，报告一天后过期；服务 active 不代表检测验证成功。
+日志为 `/var/log/falco/falco.json`；数据库为 `tsa/state/tsa.db`；评分报告为 `tsa/reports/last_scan.json`，基线为 `/var/lib/tsa-baseline/lynis-report.dat`。Lynis 部署时、每 6 小时及开机后自动扫描，TSA 每 30 秒重读。扫描失败不覆盖完整旧报告，报告过期仍会显示未评估。运行数据不提交 Git；真实告警及扣分验收见安装指南第 4 节。

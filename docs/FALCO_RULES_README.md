@@ -1,12 +1,57 @@
-# Falco 启用规则逐条解析
+# Falco 规则选择与逐条解析
 
 本文解释 **linux-runtime-security-stack** 的规则快照。官方规则核对基准为提交 `f8ecaeb`，项目例外按当前纯检测版本更新，日期为 2026-09-17。依据 `condition`、引用的 `macro/list` 和项目例外进行源码分析；这不是逐条攻击实测报告。
 
 ## 先看结论
 
-本仓库共 **82 条默认启用规则：81 条官方快照规则 + 1 条项目规则**。
+当前默认启用 **30 条：29 条官方规则 + 1 条项目验收规则**，其余定义保留但关闭。原始快照共有 94 条定义，最初启用 82 条。
 
-| 来源 | 定义数 | 默认启用 | 默认关闭 | 本文编号 |
+## 默认保留的 30 条
+
+适用普通 Ubuntu 主机，不是完整容器/云平台方案；Web 三条只在对应服务活动时触发。`89-host-profile.yaml` 控制检测开关，`tsa/policy_config.yaml` 控制分值。1 分为验收信号、5 分为需上下文的审计线索、10 分为敏感变更/可疑行为、15～20 分为较具体的高风险特征；都不是攻击成功判定。
+
+| 规则名 | 当前风险值 | 有效期 | 选择与计分依据 |
+|---|---:|---|---|
+| `Directory traversal monitored file read` | 10 | 4 小时 | 路径穿越式敏感文件访问 |
+| `Read sensitive file untrusted` | 5 | 1 小时 | 非预期敏感文件读取，需排查合法登录和虚拟机组件 |
+| `Search Private Keys or Passwords` | 10 | 4 小时 | 搜索密钥或口令线索 |
+| `Clear Log Activities` | 10 | 4 小时 | 日志清理，需核对维护任务 |
+| `Create Symlink Over Sensitive Files` | 5 | 1 小时 | 敏感路径软链接变更 |
+| `Create Hardlink Over Sensitive Files` | 5 | 1 小时 | 敏感路径硬链接变更 |
+| `Linux Kernel Module Injection Detected` | 10 | 4 小时 | 内核模块加载，需核对驱动维护 |
+| `PTRACE attached to process` | 5 | 1 小时 | 进程附加调试，可能为合法调试 |
+| `Execution from /dev/shm` | 10 | 4 小时 | 共享内存目录执行 |
+| `Fileless execution via memfd_create` | 15 | 4 小时 | 内存文件执行，仍需核对合法运行时 |
+| `Update Package Repository` | 5 | 1 小时 | 软件源变更，需核对批准记录 |
+| `Write below binary dir` | 10 | 4 小时 | 系统程序写打开 |
+| `Write below monitored dir` | 10 | 4 小时 | 启动、库和关键目录写打开 |
+| `Modify binary dirs` | 10 | 4 小时 | 系统程序删除或重命名 |
+| `Detect crypto miners using the Stratum protocol` | 15 | 4 小时 | 挖矿地址参数特征，不代表已确认挖矿 |
+| `Netcat/Socat Remote Code Execution on Host` | 15 | 4 小时 | 网络工具执行命令特征 |
+| `Known Cryptominer Process Executed` | 15 | 4 小时 | 矿工名称特征，需核对程序来源 |
+| `Modify Shell Configuration File` | 5 | 1 小时 | Shell 启动配置变更 |
+| `Set Setuid or Setgid bit` | 10 | 4 小时 | SUID 或 SGID 权限变更 |
+| `Adding ssh keys to authorized_keys` | 10 | 4 小时 | SSH 持久访问凭据变更 |
+| `Run shell untrusted` | 10 | 4 小时 | 非预期进程启动 Shell |
+| `Remove Bulk Data from Disk` | 10 | 4 小时 | 批量删除命令特征，需核对清理任务 |
+| `Web Server Spawned Shell` | 15 | 4 小时 | Web 进程链启动 Shell |
+| `Web Server Spawned Suspicious Child Process` | 10 | 4 小时 | Web 进程链启动可疑工具 |
+| `Reverse Shell from Web Server` | 20 | 24 小时 | Web 进程链反向 Shell 字符串特征 |
+| `Sudo Potential Privilege Escalation` | 15 | 4 小时 | sudo 可疑参数，不确认漏洞利用成功 |
+| `Polkit Local Privilege Escalation Vulnerability (CVE-2021-4034)` | 10 | 4 小时 | pkexec 可疑启动形态，不检查补丁状态 |
+| `Potential Local Privilege Escalation via Environment Variables Misuse` | 10 | 4 小时 | 提权相关环境变量特征 |
+| `Delete or rename shell history` | 5 | 1 小时 | 历史记录删除或重命名 |
+| `Monitor specific file access` | 1 | 15 分钟 | 演示文件验收信号，不代表真实入侵 |
+
+同一规则当前只取未过期证据的最高风险值，重复报警只续期；不同规则分别计分，运行时分最低为 0。撤下的规则不再贡献当前风险，历史证据不删除。过期只代表离开观察窗口，不代表已完成处置。priority 和 MITRE 标签不再自动决定分值；未配置规则仅记录。
+
+低噪声不等于全面安全：容器、Kubernetes、云元数据、RPM 场景默认关闭；代理环境、普通 UDP、用户管理、基础查询等宽泛行为也不纳入默认计分。正常驱动安装、调试、登录组件仍可能触发保留规则，需核对证据后设置窄范围例外，不按进程名整体放行。
+
+## 原始快照参考目录
+
+以下保留原编号，便于查历史报警；表内 82 条为精简前目录，**不代表现在启用 82 条**。
+
+| 来源 | 定义数 | 原始启用 | 原始关闭 | 本文编号 |
 |---|---:|---:|---:|---|
 | [falco_rules.yaml](../falco/official-rules/falco_rules.yaml) | 25 | 25 | 0 | 01～25 |
 | [falco-sandbox_rules.yaml](../falco/official-rules/falco-sandbox_rules.yaml) | 37 | 25 | 12 | 26～50 |
@@ -20,7 +65,7 @@
 
 ## 异常行为分类
 
-按规则的**主要检测行为**分为以下 10 类，每条只归入一类，不重复统计。数量表示启用的规则条数，不是独立攻击种类或实际报警次数；这是本文的阅读分类，不是 Falco 官方标签或 MITRE 分类。正常运维也可能触发这些规则，默认关闭的 12 条不计入下表。
+以下分类统计精简前的 82 条参考规则，不是当前默认启用数。按主要行为归类，每条只计一次，不代表独立攻击种类或实际报警次数。当前保留范围以文首 30 条表为准。
 
 | 类别 | 主要关注的行为 | 规则数 | 对应下文编号 |
 |---|---|---:|---|
@@ -721,20 +766,21 @@
 1. **找规则：** 用英文 `rule` 名称找到本文条目，不只看网页中文标题。
 2. **对操作：** 对齐事件时间及其时区、进程、完整命令、文件/网络目标、容器和返回结果。旧版日志字段不完整时，不凭进程名推断一定是自己的测试。
 3. **看上下文：** 确认是登录、代理、软件安装、备份等已知任务，还是无法解释的访问；一条报警不是入侵结论。
-4. **分清记录：** 同一操作可符合多条规则，同一程序也可能反复打开不同文件；事件数量不是攻击次数。TSA 扣 0 分可能是计分去重/限额，不代表这条检测不存在。
+4. **分清记录：** 同一操作可符合多条规则，同一程序也可能反复打开不同文件；事件数量不是攻击次数。TSA 扣 0 分可能是同规则风险续期、已达总分下限、过期、维护或未配置计分，不代表这条检测不存在。
 5. **再调整：** 只针对证据充分的正常行为增加有边界的例外。不要因为某条很吵就删除所有证据，也不要把调低评分当成修复检测。
 
 ## 六、在哪里修改
 
 - **新增规则或覆盖条件：** 仓库 [falco/rules.d/91-custom-rules.yaml](../falco/rules.d/91-custom-rules.yaml)，也可在同目录新增 YAML。使用受支持的 `override` 方式追加/替换已有 macro/list/condition，不要直接编辑带校验的官方文件。
-- **项目自带例外：** [95-security-stack-exceptions.yaml](../falco/rules.d/95-security-stack-exceptions.yaml) 只豁免相关 Falco 报警，不关闭 BPF 文件保护。本文提到的 `user_known_*` 多为调优入口，并不代表默认已配置业务白名单。
+- **默认规则选择：** [89-host-profile.yaml](../falco/rules.d/89-host-profile.yaml) 覆盖官方规则开关；添加规则时同时评估是否应在 TSA 中配置分值。
+- **项目自带例外：** [95-security-stack-exceptions.yaml](../falco/rules.d/95-security-stack-exceptions.yaml) 只豁免相关 Falco 报警；本项目没有 BPF 文件保护。本文提到的 `user_known_*` 多为调优入口，并不代表默认已配置业务白名单。
 - **安装路径：** `/etc/falco/falco.yaml` 的 `rules_files` 指向 `/etc/falco/security-stack/rules/<规则包ID>/official/`、`custom/` 等实际文件；额外主机规则、服务 `-r` 参数和优先级设置也可能改变实际加载效果。
 - **生效步骤：** 按 [规则指南](FALCO_RULES.md#4-自定义规则怎么添加) 校验并重新部署。不要只修改安装副本，也不要把 GitHub 页面更新理解为 Ubuntu 上自动更新。
 - **扣分而非检测：** [tsa/policy_config.yaml](../tsa/policy_config.yaml) 控制 TSA 评分。评分配置不改变 Falco 检测条件，也不会触发阻断。
 
-## 附录：12 条默认关闭规则
+## 附录：原始快照关闭的 12 条规则
 
-以下全部位于 [falco-sandbox_rules.yaml](../falco/official-rules/falco-sandbox_rules.yaml)，均设置 `enabled: false`。这里只交代用途，不计入上面的 82 条启用解析；启用前需单独评估条件、字段、噪声和环境。
+以下全部位于 [falco-sandbox_rules.yaml](../falco/official-rules/falco-sandbox_rules.yaml)，原始定义均设置 `enabled: false`，目前继续关闭。加上本次关闭的 52 条，项目默认共关闭 64 条；启用前需单独评估条件、字段、噪声和环境。
 
 | 规则名 | 用途与启用前注意事项 |
 |---|---|

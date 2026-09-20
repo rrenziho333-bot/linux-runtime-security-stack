@@ -6,6 +6,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import shlex
 import sqlite3
 import subprocess
@@ -18,6 +19,9 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, Iterator, List, Mapping, Optional, Tuple
 
 import yaml
+
+from weight_policy import read_policy, final_score as weighted_score
+from baseline_scoring import baseline_snapshot, read_report, score_report
 
 
 LOG = logging.getLogger(__name__)
@@ -34,6 +38,54 @@ def _clamp_score(value: float) -> float:
 def _resolve_path(config_dir: Path, value: str) -> Path:
     path = Path(value).expanduser()
     return path if path.is_absolute() else config_dir / path
+
+
+def parse_event_time(value: str) -> float:
+    # Falco uses nanoseconds; Ubuntu 22.04's Python 3.10 expects microseconds.
+    normalized = re.sub(r"\.\d+(?=Z|[+-]\d{2}:\d{2}$)",
+                        lambda match: match.group()[:7].ljust(7, "0"), value)
+    timestamp = datetime.fromisoformat(normalized.replace("Z", "+00:00"))
+    if timestamp.tzinfo is None:
+        raise ValueError("Missing timezone")
+    return timestamp.timestamp()
+
+
+def runtime_risk_breakdown(
+    db: sqlite3.Connection, runtime_cfg: Mapping[str, Any], now: float
+) -> List[Dict[str, Any]]:
+    """Shared by the collector and read-only API, including pre-migration databases."""
+    controls = runtime_cfg.get("event_control", {}) or {}
+    cap = max(0, int(controls.get("max_active_points_per_rule", 20)))
+    peak = runtime_cfg.get("aggregation") == "peak_per_rule"
+    columns = {row[1] for row in db.execute("PRAGMA table_info(events)")}
+    weight = "COALESCE(risk_points, deducted_points)" if peak and "risk_points" in columns else "deducted_points"
+    aggregate = "MAX" if peak else "SUM"
+    statuses = "'scored', 'risk_refreshed'" if peak else "'scored'"
+    rows = db.execute(
+        f"SELECT rule_name, {aggregate}({weight}) points, COUNT(*) evidence_count, "
+        f"MAX(risk_expires_at) expires_at FROM events WHERE source='falco' "
+        f"AND status IN ({statuses}) AND {weight} > 0 AND risk_expires_at > ? "
+        "GROUP BY rule_name ORDER BY points DESC, rule_name", (now,)
+    ).fetchall()
+    specific = runtime_cfg.get("specific_rules", {}) or {}
+    result = []
+    for row in rows:
+        name = row["rule_name"]
+        if runtime_cfg.get("unmapped_rule_action") == "record_only" and name not in specific:
+            continue
+        policy = specific.get(name)
+        if isinstance(policy, Mapping) and not policy.get("enabled", True):
+            continue
+        points = max(0, int(row["points"] or 0))
+        if cap:
+            points = min(points, cap)
+        if peak and policy is not None:
+            points = min(points, max(0, int(policy.get("points", 0) if isinstance(policy, Mapping) else policy)))
+        if points:
+            result.append({"rule": name, "points": points,
+                           "evidence_count": row["evidence_count"], "expires_at": row["expires_at"],
+                           "reason": policy.get("reason", "") if isinstance(policy, Mapping) else ""})
+    return result
 
 
 class StateStore:
@@ -83,6 +135,11 @@ class StateStore:
         }
         if "risk_expires_at" not in columns:
             self.db.execute("ALTER TABLE events ADD COLUMN risk_expires_at REAL")
+        if "risk_points" not in columns:
+            self.db.execute("ALTER TABLE events ADD COLUMN risk_points INTEGER")
+        self.db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_events_risk_expiry ON events(risk_expires_at, rule_name)"
+        )
         self.db.execute(
             "CREATE INDEX IF NOT EXISTS idx_events_active "
             "ON events(risk_expires_at, rule_name) "
@@ -206,14 +263,15 @@ class StateStore:
         event_key: str,
         payload: Mapping[str, Any],
         risk_expires_at: Optional[float] = None,
+        risk_points: Optional[int] = None,
     ) -> None:
         with self.transaction():
             self.db.execute(
                 """
                 INSERT INTO events(
                     received_time, event_time, source, rule_name, status,
-                    deducted_points, event_key, payload, risk_expires_at
-                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    deducted_points, event_key, payload, risk_expires_at, risk_points
+                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     received_time,
@@ -225,6 +283,7 @@ class StateStore:
                     event_key,
                     json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
                     risk_expires_at,
+                    risk_points,
                 ),
             )
 
@@ -310,9 +369,10 @@ class RulePolicy:
 
 
 class RiskScorer:
-    def __init__(self, config: Mapping[str, Any], store: StateStore):
+    def __init__(self, config: Mapping[str, Any], store: StateStore, config_dir: Optional[Path] = None):
         self.config = config
         self.store = store
+        self.config_dir = config_dir
         posture = store.get("posture_score", None)
         self.posture_score = float(posture) if posture is not None else None
         self.refresh_runtime_score(time.time())
@@ -387,7 +447,12 @@ class RiskScorer:
         if specific is not None:
             if not specific.enabled:
                 return specific, "rule explicitly disabled"
-            return specific, f"specific rule [{rule}]"
+            raw = (runtime_cfg.get("specific_rules", {}) or {})[rule]
+            detail = raw.get("reason", "") if isinstance(raw, Mapping) else ""
+            return specific, detail or f"specific rule [{rule}]"
+
+        if runtime_cfg.get("unmapped_rule_action") == "record_only":
+            return RulePolicy(0, 0, 0, 3600, False), "No reviewed scoring policy; evidence only"
 
         defaults = runtime_cfg.get("event_control", {}) or {}
         tag_mapping = runtime_cfg.get("tag_mapping", {}) or {}
@@ -471,6 +536,9 @@ class RiskScorer:
         output_fields = output_fields if isinstance(output_fields, Mapping) else {}
         event_key = self._event_key(rule, output_fields)
         risk_ttl_seconds = 0
+        risk_points = None
+        expires_at = None
+        runtime_cfg = self.config.get("runtime_rules", {}) or {}
 
         if suppress_scoring:
             status, admitted, reason, count = "maintenance", 0, "maintenance window", 1
@@ -480,6 +548,37 @@ class RiskScorer:
             policy, reason = self.resolve_policy(rule, priority, tags)
             if not policy.enabled:
                 status, admitted, count = "ignored", 0, 1
+            elif runtime_cfg.get("aggregation") == "peak_per_rule":
+                status, admitted, count = "ignored", 0, 1
+                risk_points = policy.points
+                occurred = now
+                valid_time = True
+                if runtime_cfg.get("event_time_scoring", False):
+                    try:
+                        occurred = parse_event_time(str(event.get("time", "")))
+                        valid_time = occurred <= now + 300
+                    except (ValueError, OverflowError, OSError):
+                        valid_time = False
+                expires_at = min(occurred, now) + policy.risk_ttl_seconds
+                if not valid_time:
+                    status, risk_points, expires_at = "invalid_time", 0, None
+                    reason += "; missing/invalid event time or clock ahead by over 5 minutes"
+                    self.store.set("runtime_time_error_at", now)
+                    LOG.warning("Falco event time is invalid for rule %s; check clock and log format", rule)
+                elif expires_at <= now:
+                    self.store.set("runtime_valid_time_at", now)
+                    status, risk_points, expires_at = "expired", 0, None
+                    reason += "; event risk already expired before ingestion"
+                elif risk_points > 0:
+                    self.store.set("runtime_valid_time_at", now)
+                    active = runtime_risk_breakdown(self.store.db, runtime_cfg, now)
+                    before = sum(item["points"] for item in active)
+                    previous = next((item["points"] for item in active if item["rule"] == rule), 0)
+                    cap = int((runtime_cfg.get("event_control", {}) or {}).get("max_active_points_per_rule", 20))
+                    contribution = min(risk_points, cap) if cap > 0 else risk_points
+                    after = before - previous + max(previous, contribution)
+                    admitted = min(100, after) - min(100, before)
+                    status = "scored" if admitted else "risk_refreshed"
             else:
                 risk_ttl_seconds = policy.risk_ttl_seconds
                 admitted, status, count = self.store.admit_points(
@@ -490,11 +589,14 @@ class RiskScorer:
                     dedup_window=policy.dedup_window,
                     max_points_per_minute=policy.max_points_per_minute,
                 )
+                expires_at = now + risk_ttl_seconds if admitted > 0 else None
 
         record = {
             "priority": priority,
             "tags": tags,
             "reason": reason,
+            "risk_points": risk_points,
+            "scoring_model": runtime_cfg.get("aggregation", "sum_capped"),
             "occurrence_count": count,
             "user": output_fields.get("user.name", ""),
             "process": output_fields.get("proc.name", ""),
@@ -518,9 +620,8 @@ class RiskScorer:
             deducted_points=admitted,
             event_key=event_key,
             payload=record,
-            risk_expires_at=(
-                now + risk_ttl_seconds if admitted > 0 else None
-            ),
+            risk_expires_at=expires_at,
+            risk_points=risk_points,
         )
         self.refresh_runtime_score(now)
         record["runtime_score"] = self.runtime_score
@@ -531,9 +632,7 @@ class RiskScorer:
     def refresh_runtime_score(self, now: Optional[float] = None) -> float:
         current = time.time() if now is None else now
         runtime_cfg = self.config.get("runtime_rules", {}) or {}
-        controls = runtime_cfg.get("event_control", {}) or {}
-        max_per_rule = max(0, int(controls.get("max_active_points_per_rule", 20)))
-        active_risk = self.store.active_risk_points(current, max_per_rule)
+        active_risk = sum(item["points"] for item in runtime_risk_breakdown(self.store.db, runtime_cfg, current))
         self.runtime_score = _clamp_score(100 - active_risk)
         self.store.set("runtime_score", self.runtime_score)
         return self.runtime_score
@@ -544,27 +643,12 @@ class RiskScorer:
         self.refresh_runtime_score(current)
         return max(0, int(self.runtime_score - previous))
 
-    def final_score(self) -> Optional[float]:
+    def final_score(self, weights=None) -> Optional[float]:
         self.refresh_runtime_score(time.time())
-        scoring = self.config.get("scoring", {}) or {}
-        weights = scoring.get("weights", {}) or {}
-        posture_weight = max(0.0, float(weights.get("posture", 0.4)))
-        runtime_weight = max(0.0, float(weights.get("runtime", 0.6)))
-        total = posture_weight + runtime_weight
-        if total == 0:
-            posture_weight, runtime_weight, total = 0.4, 0.6, 1.0
-        if posture_weight and self.posture_score is None:
-            return None
-        return round(
-            _clamp_score(
-                (
-                    (self.posture_score or 0) * posture_weight
-                    + self.runtime_score * runtime_weight
-                )
-                / total
-            ),
-            2,
-        )
+        weights = weights if weights is not None else read_policy(self.config, self.config_dir)
+        details = self.store.get("baseline_details")
+        posture = baseline_snapshot({"baseline_details": details}).get("score") if details else self.posture_score
+        return weighted_score(posture, self.runtime_score, weights)
 
 
 class RotatingLineReader:
@@ -719,7 +803,7 @@ class TSAFusionAgent:
             self.config_dir, str(storage.get("report_path", "reports/last_scan.json"))
         )
         self.store = StateStore(state_db)
-        self.scorer = RiskScorer(self.config, self.store)
+        self.scorer = RiskScorer(self.config, self.store, self.config_dir)
         self.stop_event = threading.Event()
         self.recent_lynis_hits: List[Dict[str, Any]] = list(
             self.store.get("recent_lynis_hits", [])
@@ -761,21 +845,27 @@ class TSAFusionAgent:
     def run_posture_scan(self) -> Optional[float]:
         baseline = self.config.get("baseline_lynis", {}) or {}
         if not baseline.get("enabled", False):
-            self.scorer.set_posture_score(None)
-            self.store.set("baseline_status", "disabled")
+            self.recent_lynis_hits = []
+            with self.store.transaction():
+                self.scorer.set_posture_score(None)
+                self.store.set("baseline_status", "disabled")
+                self.store.set("baseline_details", {"status": "disabled", "score": None})
+                self.store.set("recent_lynis_hits", [])
             return None
 
         try:
             return self._run_posture_scan(baseline)
         except (OSError, ValueError, subprocess.SubprocessError) as error:
             LOG.warning("Baseline unavailable: %s", error)
-            self.scorer.set_posture_score(None)
-            self.store.set("baseline_status", "unavailable")
             self.recent_lynis_hits = []
-            self.store.set("recent_lynis_hits", [])
+            with self.store.transaction():
+                self.scorer.set_posture_score(None)
+                self.store.set("baseline_status", "unavailable")
+                self.store.set("recent_lynis_hits", [])
+                self.store.set("baseline_details", {"status": "unavailable", "score": None, "errors": [str(error)]})
             return None
 
-    def _run_posture_scan(self, baseline: Mapping[str, Any]) -> float:
+    def _run_posture_scan(self, baseline: Mapping[str, Any]) -> Optional[float]:
         report_path = _resolve_path(
             self.config_dir,
             str(baseline.get("report_path", "/var/log/lynis-report.dat")),
@@ -798,47 +888,34 @@ class TSAFusionAgent:
 
         report_stat = report_path.stat()
         max_age = max(1, int(baseline.get("max_report_age_seconds", 86400)))
-        if report_stat.st_size == 0 or time.time() - report_stat.st_mtime > max_age:
-            raise ValueError("Lynis report is empty or stale")
-        warnings, suggestions = parse_lynis_report(report_path, require_complete=True)
-        controls = set(baseline.get("include_controls", []) or [])
-        deductions = baseline.get("deduct_by_control", {}) or {}
-        defaults = baseline.get("default_deduct", {}) or {}
-        mode = str(baseline.get("scoring_mode", "warnings_only"))
-        hits: List[Dict[str, Any]] = []
-
-        def apply(kind: str, items: Iterable[Tuple[str, str]]) -> int:
-            subtotal = 0
-            default = int(defaults.get(kind, 0))
-            for control, message in items:
-                if controls and control not in controls:
-                    continue
-                points = max(0, int(deductions.get(control, default)))
-                if points:
-                    subtotal += points
-                    hits.append(
-                        {
-                            "type": kind.upper(),
-                            "control": control,
-                            "deducted_points": points,
-                            "message": message,
-                        }
-                    )
-            return subtotal
-
-        total = apply("warning", warnings)
-        if mode == "warnings_and_selected_suggestions":
-            total += apply("suggestion", suggestions)
-        self.scorer.set_posture_score(100 - total)
-        self.store.set("baseline_status", "ok")
-        self.store.set("baseline_report_mtime", report_stat.st_mtime)
-        self.recent_lynis_hits = hits[-50:]
-        self.store.set("recent_lynis_hits", self.recent_lynis_hits)
+        age = time.time() - report_stat.st_mtime
+        if report_stat.st_size == 0:
+            raise ValueError("Lynis 报告为空；检查 tsa-baseline.service 日志")
+        if age < -300:
+            raise ValueError("Lynis 报告时间领先主机时钟；请校时并重新扫描")
+        if age > max_age:
+            raise ValueError(f"Lynis 报告已过期（{age / 3600:.1f} 小时，有效期 {max_age / 3600:g} 小时）；检查 tsa-baseline.timer 或手动启动 tsa-baseline.service")
+        parsed = read_report(report_path)
+        if report_path.stat().st_mtime_ns != report_stat.st_mtime_ns:
+            raise ValueError("Lynis report changed while being read; retry after scan finishes")
+        details = score_report(parsed, baseline)
+        details.update({"report_path": str(report_path), "report_mtime": report_stat.st_mtime,
+                        "expires_at": report_stat.st_mtime + max_age})
+        self.recent_lynis_hits = [
+            {"type": "CONTROL", "control": c["control"], "deducted_points": c["deducted_points"],
+             "message": c["reason"]} for c in details["controls"] if c["deducted_points"]
+        ]
+        with self.store.transaction():
+            self.scorer.set_posture_score(details["score"])
+            self.store.set("baseline_status", details["status"])
+            self.store.set("baseline_details", details)
+            self.store.set("baseline_report_mtime", report_stat.st_mtime)
+            self.store.set("recent_lynis_hits", self.recent_lynis_hits)
         LOG.info(
-            "Posture score %.2f/100 from %s (%d deductions)",
+            "Posture score %s/100 from %s (%d deductions)",
             self.scorer.posture_score,
             report_path,
-            total,
+            details["deducted_points"],
         )
         return self.scorer.posture_score
 
@@ -864,10 +941,15 @@ class TSAFusionAgent:
 
 
     def generate_report(self, status: str = "running") -> None:
+        weights = read_policy(self.config, self.config_dir)
+        baseline = baseline_snapshot({"baseline_details": self.store.get("baseline_details"),
+                                      "baseline_status": self.store.get("baseline_status", "unavailable"),
+                                      "posture_score": self.scorer.posture_score})
         report = {
             "generated_time": _utc_now(),
             "status": status,
-            "baseline_status": self.store.get("baseline_status", "unavailable"),
+            "baseline_status": baseline["status"],
+            "baseline": baseline,
             "sources": {
                 "falco_log_path": str(self.falco_log_path),
                 "lynis_report_path": str(
@@ -875,11 +957,15 @@ class TSAFusionAgent:
                 ),
             },
             "scores": {
-                "final": self.scorer.final_score(),
-                "posture": self.scorer.posture_score,
+                "final": self.scorer.final_score(weights),
+                "posture": baseline.get("score"),
                 "runtime": self.scorer.runtime_score,
             },
             "recent_lynis_hits": self.recent_lynis_hits[-50:],
+            "weights": weights,
+            "runtime_risks": runtime_risk_breakdown(
+                self.store.db, self.config.get("runtime_rules", {}) or {}, time.time()
+            ),
             "recent_security_events": self.store.recent_events(50),
         }
         self.report_path.parent.mkdir(parents=True, exist_ok=True)

@@ -1,0 +1,16 @@
+[Unit]
+Description=Refresh and atomically publish TSA Lynis baseline
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+ExecStart=/usr/bin/python3 -I /usr/local/libexec/tsa-refresh-baseline.py
+TimeoutStartSec=45min
+UMask=0027
+Nice=10
+Environment=PATH=/usr/sbin:/usr/bin:/sbin:/bin
+Environment=LC_ALL=C
+# Do not sandbox the filesystem view: Lynis must inspect the actual host.

@@ -1,7 +1,7 @@
 # Template unit: deploy-security-stack.sh renders __RUNTIME_USER__ and
 # __SRC_DIR__ at install time. Do not enable this file directly.
 [Unit]
-Description=Read-only TSA security pipeline dashboard
+Description=TSA dashboard and authenticated score weight API
 After=tsa-fusion.service falco-modern-bpf.service
 Wants=tsa-fusion.service
 
@@ -10,6 +10,7 @@ Type=simple
 User=__RUNTIME_USER__
 Group=__RUNTIME_USER__
 WorkingDirectory=__SRC_DIR__/tsa
+EnvironmentFile=-/etc/tsa/weights-api.env
 ExecStart=/usr/bin/python3 __SRC_DIR__/tsa/tsa_dashboard.py --tsa-config __SRC_DIR__/tsa/policy_config.yaml --bind 127.0.0.1 --port 8766
 Restart=on-failure
 RestartSec=5
@@ -18,6 +19,7 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=read-only
+ReadWritePaths=__SRC_DIR__/tsa/settings
 ProtectKernelTunables=true
 ProtectKernelModules=true
 ProtectControlGroups=true

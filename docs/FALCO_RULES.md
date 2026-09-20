@@ -1,12 +1,12 @@
 # Falco 规则指南
 
-逐条触发条件、正常业务场景与排查方法见 [82 条启用规则解析](FALCO_RULES_README.md)。
+30 条默认规则的分值、触发条件与排查方法见 [规则解析](FALCO_RULES_README.md)。
 
 ## 1. clone 下来的规则在哪里
 
 **git clone 只下载文件，不会启动检测。** 首次部署按 [INSTALL.md](INSTALL.md) 操作。
 
-官方规则位于 `falco/official-rules/`。按当前仓库 YAML 的默认开关统计：
+官方定义位于 `falco/official-rules/`。下表是原始快照开关，**不是本项目最终启用数量**：
 
 | 文件 | 规则总数 | 默认启用 | 默认关闭 |
 |---|---:|---:|---:|
@@ -15,12 +15,13 @@
 | `falco-incubating_rules.yaml` | 31 | 31 | 0 |
 | 合计 | 93 | 81 | 12 |
 
-`enabled: false` 表示关闭；未写该字段时默认启用。12 条关闭规则都在 sandbox 文件中，其余官方规则默认启用。加上项目演示规则，共 **82 条默认启用的规则定义**；主机配置仍可覆盖开关或过滤优先级，容器规则也不会因普通主机操作而触发。规则存在不等于能覆盖所有攻击。
+项目通过 `89-host-profile.yaml` 覆盖开关，最终默认启用 **29 条官方规则 + 1 条演示规则 = 30 条**。其余 64 条定义关闭但保留，共享宏、列表不能随意删除。已有额外主机规则或用户自定义规则可能改变实际数量。
 
 项目规则位于 `falco/rules.d/`：
 
 | 文件 | 用途 | 是否必须 |
 |---|---|---|
+| `89-host-profile.yaml` | 选择默认 29 条官方主机规则，其余关闭 | 默认 30 条方案必需 |
 | `90-local-file-monitoring.yaml` | 检测打开 `/etc/tsa-protected-demo` 进行读写，只报警 | 当前演示与验收使用，保留 |
 | `91-custom-rules.yaml` | 自定义入口，初始 `[]` 表示没有自定义规则 | 文件名非强制，也可新增其他 `*.yaml` |
 | `95-security-stack-exceptions.yaml` | 为 falcoctl 写入 `/root/.sigstore/` 设置告警例外 | 非启动必需；删除可能增加组件自身告警，建议保留 |
@@ -91,4 +92,4 @@ cat /tmp/lrss-learning.txt
 sudo tail -n 20 /var/log/falco/falco.json
 ```
 
-若无事件，稍等后再执行命令 4、5；更早的规则先匹配时，告警名称可能不同。这条规则只检测打开行为，不阻断。扣分配置在 `tsa/policy_config.yaml`，与 Falco 检测规则分开；删除自定义规则后也需重新部署。
+若无事件，稍等后再执行命令 4、5；更早的规则先匹配时，告警名称可能不同。新规则默认只报警、不扣分；需要计分时，在 `tsa/policy_config.yaml` 的 `specific_rules` 添加同名规则的 `points`、`risk_ttl_seconds`、`reason`，再重启 `tsa-fusion tsa-dashboard`。删除或改变检测规则后需重新部署；不直接改官方快照。

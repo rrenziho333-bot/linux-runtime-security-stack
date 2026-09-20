@@ -17,6 +17,7 @@ from tsa_dashboard import DashboardData
 
 
 TARGET = Path("/etc/tsa-protected-demo")
+RULE = "Monitor specific file access"
 
 
 def write_demo(token, device, inode):
@@ -59,7 +60,12 @@ def main():
     if args.write_demo:
         return write_demo(*args.write_demo)
     try:
+        if os.geteuid() != 0:
+            subprocess.run(['sudo', '-v'], check=True)
         data = DashboardData(Path(__file__).with_name("policy_config.yaml"))
+        before = data.snapshot()
+        if not before['availability']['ready']:
+            raise ValueError('评分尚不可用：' + before['availability']['reason'])
         with closing(data._connect()) as db:
             after = db.execute("SELECT COALESCE(MAX(id), 0) FROM events").fetchone()[0]
         info = TARGET.lstat()
@@ -86,7 +92,22 @@ def main():
         for event in falco:
             print(f"{event['source']} #{event['id']} | {event['rule']} | {event['status']} | 历史扣分 {event['deducted_points']}")
         if success:
-            print("PASS：本次文件操作结果与入库证据一致（不代表完整攻击覆盖）。")
+            after_snapshot = data.snapshot()
+            risks = after_snapshot['runtime_risks']
+            active = next((r['points'] for r in risks if r['rule'] == RULE), None)
+            expected = data.config['runtime_rules']['specific_rules'][RULE]['points']
+            if not any(e['rule'] == RULE for e in falco) or active != expected:
+                raise ValueError(f'验收规则未正确计分：期望 {expected}，实际 {active}')
+            if not after_snapshot['availability']['ready']:
+                raise ValueError('测试后评分不可用：' + after_snapshot['availability']['reason'])
+            scores = after_snapshot['scores']
+            if scores['runtime'] != max(0, 100 - sum(r['points'] for r in risks)):
+                raise ValueError('运行时总分与当前风险明细不一致')
+            prior = next((r['points'] for r in before['runtime_risks'] if r['rule'] == RULE), 0)
+            print('测试前分数：' + json.dumps(before['scores'], ensure_ascii=False))
+            print('测试后分数：' + json.dumps(scores, ensure_ascii=False))
+            print(f'本规则当前风险：{prior} → {active} 分；重复触发仅续期，其他并发告警可能影响总分。')
+            print("PASS：真实写入、同 PID 告警、规则风险值和运行时总分对账一致（不代表完整攻击覆盖）。")
             return 0
         print("FAIL：结果或证据不完整；不要仅凭服务 active 判断成功。")
         if not falco:

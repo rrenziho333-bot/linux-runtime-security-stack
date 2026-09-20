@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
-"""Read-only local dashboard for the TSA/Falco/Lynis security pipeline."""
+"""Local TSA dashboard with an authenticated server-to-server weight API."""
 
 from __future__ import annotations
 
 import argparse
+import hmac
 import ipaddress
 import json
 import logging
-import re
+import os
 import sqlite3
 import subprocess
 import time
@@ -21,6 +22,10 @@ from typing import Any, Dict, List, Mapping, Optional
 from urllib.parse import parse_qs, urlparse
 
 import yaml
+
+from tsa_core import parse_event_time, runtime_risk_breakdown
+from baseline_scoring import baseline_snapshot
+from weight_policy import read_policy, update_policy, VersionConflict, final_score as weighted_score
 
 
 HTML = r"""<!doctype html>
@@ -46,6 +51,7 @@ main{max-width:1440px;margin:auto;padding:24px 28px}h1{font-size:24px;margin:0}h
 .badge{font-size:12px;padding:2px 6px;white-space:nowrap;border-radius:3px;display:inline-block}
 .falco{color:var(--blue);background:#e9f3f9}
 section.events{padding-top:22px}.section-head{align-items:flex-start}.toolbar{justify-content:flex-start;flex-wrap:wrap;margin:16px 0 12px}
+#risk-detail,#baseline-detail{margin-bottom:20px}#risk-detail>summary,#baseline-detail>summary{cursor:pointer;font-weight:600;padding:4px 0}
 label{display:flex;align-items:center;gap:7px;font-size:13px}input,select{font:inherit;color:inherit;background:var(--paper);border:1px solid #bcc9c1;border-radius:4px;padding:7px 9px;min-height:36px;max-width:100%}
 input{width:260px}select{max-width:270px}input:focus-visible,select:focus-visible,summary:focus-visible{outline:2px solid var(--green);outline-offset:3px}
 .table-head,.event-summary{display:grid;grid-template-columns:minmax(175px,1.2fr) minmax(220px,2.2fr) minmax(110px,1fr) 95px 130px;gap:14px;align-items:center}
@@ -63,7 +69,7 @@ input{width:260px}select{max-width:270px}input:focus-visible,select:focus-visibl
 .evidence-row{padding:8px 0;border-bottom:1px solid var(--line);overflow-wrap:anywhere}
 .raw{grid-column:1/-1}.raw summary{cursor:pointer;color:var(--muted);font-size:13px}pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#f4f6f5;max-height:300px;overflow:auto;padding:12px;font-size:12px}
 .error{background:#fce8eb;border-left:3px solid var(--red);padding:12px;margin:12px 0;overflow-wrap:anywhere}
-.empty{padding:30px 14px;color:var(--muted);background:var(--paper)}.stale #pipeline,.stale #events{opacity:.55}
+.empty{padding:30px 14px;color:var(--muted);background:var(--paper)}.stale #pipeline,.stale #events,.stale #risk-detail,.stale #baseline-detail{opacity:.55}
 @media(max-width:1000px){.overview{grid-template-columns:1fr}.score:last-child{border-right:0}.components{border-top:1px solid var(--line)}
 .table-head,.event-summary{grid-template-columns:minmax(160px,1fr) minmax(180px,2fr) 100px 85px 65px;gap:10px}}
 @media(max-width:700px){main{padding:16px 12px}.top{flex-direction:column;gap:10px}.refresh{text-align:left}h1{font-size:21px}
@@ -85,6 +91,8 @@ input{width:260px}select{max-width:270px}input:focus-visible,select:focus-visibl
 <section class="components"><h2>组件状态</h2><div id="pipeline" class="services"></div></section>
 </div>
 <section class="events">
+<details id="baseline-detail"><summary>基线检查与扣分明细</summary><div id="baseline-breakdown" class="record-list"></div></details>
+<details id="risk-detail"><summary>当前运行时扣分明细</summary><div id="risk-breakdown" class="record-list"></div></details>
 <div class="section-head"><h2>最近事件 <span id="event-count" class="muted"></span></h2><span id="window" class="muted"></span></div>
 <div class="toolbar">
 <label>搜索<input id="search" type="search" placeholder="规则、进程、路径或事件编号" autocomplete="off"></label>
@@ -104,9 +112,9 @@ const $=s=>document.querySelector(s);
 const localZone=Intl.DateTimeFormat().resolvedOptions().timeZone||"UTC";
 const timeKinds={falco_event:"Falco 发生时间",tsa_received:"TSA 入库时间"};
 const sourceNames={falco:"Falco"};
-const statusNames={scored:"已计分",duplicate:"去重，不重复扣分",rate_limited:"限速，不扣分",maintenance:"维护，不扣分",maintenance_reclassified:"维护，不扣分",whitelisted:"白名单，不扣分",ignored:"不计分"};
+const statusNames={scored:"已计分",risk_refreshed:"风险续期，不叠加扣分",expired:"过期证据，不扣分",invalid_time:"时间异常，不扣分",duplicate:"去重，不重复扣分",rate_limited:"限速，不扣分",maintenance:"维护，不扣分",maintenance_reclassified:"维护，不扣分",whitelisted:"白名单，不扣分",ignored:"不计分"};
 const ruleNames={"Program run with disallowed http proxy env":"进程使用未允许的代理环境","Write below etc":"写入 /etc 下的文件","Monitor specific file access":"打开演示文件","Read sensitive file untrusted":"程序读取敏感文件（未列入规则例外）","Non sudo setuid":"非 sudo 程序切换用户身份"};
-let current=null,eventSignature="",pending=false,timer=null,before=0;
+let current=null,eventSignature="",baselineSignature="",pending=false,timer=null,before=0;
 const initial=new URLSearchParams(location.search);
 let after=/^\d+$/.test(initial.get("after")||"")?initial.get("after"):"0";
 $("#pid").value=/^\d+$/.test(initial.get("pid")||"")?initial.get("pid"):"";
@@ -131,13 +139,15 @@ function renderPipeline(stages){const root=$("#pipeline");root.replaceChildren()
     box.append(left,status);root.append(box)})}
 function groupTitle(x){const f=x.evidence.falco;return ruleNames[f.rule]||f.rule||x.title}
 function statusText(x,short=false){const counts=x.status_counts||Object.values(x.evidence).reduce((a,e)=>(a[e.status]=(a[e.status]||0)+1,a),{});
-  const names=short?{scored:"计分",duplicate:"去重未扣分",rate_limited:"限额未扣分",maintenance:"维护",maintenance_reclassified:"维护",whitelisted:"白名单",ignored:"不计分"}:statusNames;
+  const names=short?{...statusNames,scored:"计分",duplicate:"去重未扣分",rate_limited:"限额未扣分",maintenance:"维护",maintenance_reclassified:"维护",whitelisted:"白名单",ignored:"不计分"}:statusNames;
   return Object.entries(counts).map(([s,n])=>(names[s]||s)+" ×"+n).join("；")}
 function renderEvidence(source,item){
   const row=el("div","evidence-row");row.append(el("strong","",(sourceNames[source]||source)+" #"+item.id),el("div","",item.rule),
     el("div","subline","事件发生："+formatTime(item.event_time)),
     el("div","subline","TSA 入库："+formatTime(item.received_time)),el("div","subline",(statusNames[item.status]||item.status)+" · 历史扣分 "+item.deducted_points));
-  if(item.risk_expires_at&&item.deducted_points>0)row.append(el("div","subline","计分到期："+formatTime(new Date(item.risk_expires_at*1000).toISOString())));
+  if(item.risk_expires_at)row.append(el("div","subline","计分到期："+formatTime(new Date(item.risk_expires_at*1000).toISOString())));
+  if(item.reason)row.append(el("div","subline","依据："+item.reason));
+  if(item.risk_points!=null)row.append(el("div","subline","规则风险值："+item.risk_points+" · 本次新增扣分："+item.deducted_points));
   if(item.file)row.append(el("div","subline","文件："+item.file));
   if(item.command)row.append(el("div","subline","命令："+item.command));
   if(item.executable)row.append(el("div","subline","程序路径："+item.executable));
@@ -182,12 +192,43 @@ $("#events").addEventListener("toggle",e=>{if(!$("#events").contains(e.target)||
   if(e.target.open)expanded.add(e.target.dataset.openKey);else expanded.delete(e.target.dataset.openKey)},true);
 function render(){
   renderScore(current.scores);renderPipeline(current.pipeline);renderEvents();
+  renderBaseline(current.baseline||{});
+  const risk=$("#risk-breakdown");risk.replaceChildren();
+  if(!current.availability.runtime_ready)risk.append(el("div","empty","监测不可用，当前风险未评估"));
+  else if(!(current.runtime_risks||[]).length)risk.append(el("div","empty","当前没有计分中的规则风险"));
+  else{
+    const total=current.runtime_risks.reduce((n,r)=>n+r.points,0);
+    risk.append(el("div","evidence-row","规则风险合计 "+total+"，运行时评分 "+Math.max(0,100-total)));
+    current.runtime_risks.forEach(r=>{const row=el("div","evidence-row");row.append(el("strong","",r.rule+" · −"+r.points),el("div","subline",r.reason),el("div","subline",r.evidence_count+" 条有效证据 · 最晚到期："+formatTime(new Date(r.expires_at*1000).toISOString())));risk.append(row)});
+  }
   $("#refresh").textContent="页面刷新："+formatTime(current.generated_time);
   $("#zone-label").textContent="显示时区："+zone();
   $("#window").textContent="本页 "+current.event_window.records+" 条证据 · "+current.summaries.length+" 组同类活动 · 非规则数量";
   $("#scope").textContent=(current.event_window.pid?"限定 PID "+current.event_window.pid+" · ":"")+(after!=="0"?"仅入库编号 > "+after+" · ":"")+"按入库时间倒序；汇总限当前页 60 秒窗口";
   $("#page-state").textContent=(before?"历史页 · ":"最新页 · ")+(current.event_window.has_more?"还有更早记录":"已到符合条件的最早记录");
   $("#older").disabled=!current.event_window.has_more;
+}
+function renderBaseline(b){
+  const signature=JSON.stringify([b,zone()]);if(signature===baselineSignature)return;baselineSignature=signature;
+  const root=$("#baseline-breakdown");root.replaceChildren();
+  const names={finding:"有发现",executed_no_finding:"已执行，无报告发现（非全部通过）",skipped:"已跳过",unknown:"无执行证据",error:"检查异常"};
+  if(b.status!=="ok")root.append(el("div","error","基线未评估 · "+(b.errors||[b.status||"无报告"]).join("；")));
+  root.append(el("div","evidence-row","策略 "+(b.policy_version||"未知")+" · 项目扣分 "+(b.deducted_points??"未知")+" · Lynis 原生指数 "+(b.hardening_index??"未知")+"（不参与综合分）"));
+  root.append(el("div","subline","报告结束："+(b.scan_end_local||"未知")+"（受审主机本地时间，报告未注明时区）"));
+  if(b.expires_at)root.append(el("div","subline","报告有效期至："+formatTime(new Date(b.expires_at*1000).toISOString())));
+  Object.entries({vulnerable_packages:"报告列出的风险软件包（非逐包扣分、非已验证 CVE）",extra_uid_zero_accounts:"额外 UID 0 账号",passwordless_accounts:"无密码账号"}).forEach(([key,label])=>{
+    const values=(b.observations||{})[key]||[];if(!values.length)return;
+    const evidence=el("details","evidence-row");evidence.append(el("summary","",label+" · "+values.length+" 项"),el("pre","",values.join("\n")));root.append(evidence);
+  });
+  (b.controls||[]).filter(c=>c.selected||c.findings.length||c.status==="error").sort((a,b)=>b.risk_points-a.risk_points||b.findings.length-a.findings.length||a.control.localeCompare(b.control)).forEach(c=>{
+    const row=el("div","evidence-row");row.append(el("strong","",c.control+" · "+c.title+" · "+(names[c.status]||c.status)+" · 扣 "+c.deducted_points+" 分"),el("div","subline","计分依据："+c.reason));
+    if(c.risk_points>c.deducted_points)row.append(el("div","subline","风险权重 "+c.risk_points+"，总扣分上限 100"));
+    c.findings.forEach(f=>row.append(el("div","",f.type+" · "+f.message),el("div","subline",[f.details,f.remediation].filter(v=>v&&v!=="-").join(" · "))));
+    c.matched_details.forEach(m=>row.append(el("div","",m.evidence.field+" = "+m.evidence.value+" · 权重 "+m.points+" · "+m.reason)));
+    root.append(row);
+  });
+  const coverage=el("details");coverage.append(el("summary","","执行记录："+(b.executed||[]).length+" 项；跳过："+(b.skipped||[]).length+" 项"),el("pre","","已执行（不代表所有子项通过）：\n"+(b.executed||[]).join("、")+"\n已跳过（原因查 Lynis 日志）：\n"+(b.skipped||[]).join("、")));
+  root.append(coverage);
 }
 $("#timezone").options[0].textContent="本地 · "+localZone;
 $("#timezone").addEventListener("change",()=>{if(current)render();if(document.body.classList.contains("stale"))renderScore({final:null,posture:null,runtime:null})});
@@ -227,11 +268,8 @@ def parse_time(value: str) -> float:
     if not value:
         return 0.0
     try:
-        # Falco emits nanoseconds; Python 3.10's ISO parser expects microseconds.
-        normalized = re.sub(r"\.\d+(?=Z|[+-]\d{2}:\d{2}$)",
-                            lambda match: match.group()[:7].ljust(7, "0"), value)
-        return datetime.fromisoformat(normalized.replace("Z", "+00:00")).timestamp()
-    except ValueError:
+        return parse_event_time(value)
+    except (ValueError, OverflowError, OSError):
         return 0.0
 
 
@@ -251,6 +289,7 @@ def service_state(name: str) -> str:
 
 class DashboardData:
     def __init__(self, tsa_config: Path):
+        self.config_dir = tsa_config.parent
         with tsa_config.open("r", encoding="utf-8") as stream:
             self.config = yaml.safe_load(stream) or {}
         storage = self.config.get("storage", {}) or {}
@@ -311,41 +350,23 @@ class DashboardData:
         return events
 
     def _scores(
-        self, db: sqlite3.Connection, state: Mapping[str, Any]
+        self, db: sqlite3.Connection, state: Mapping[str, Any],
+        risks: Optional[List[Dict[str, Any]]] = None,
+        weights=None,
     ) -> Dict[str, Optional[float]]:
         now = time.time()
-        controls = (
-            (self.config.get("runtime_rules", {}) or {}).get("event_control", {}) or {}
-        )
-        cap = max(0, int(controls.get("max_active_points_per_rule", 20)))
-        rows = db.execute(
-            """
-            SELECT rule_name, SUM(deducted_points) points FROM events
-            WHERE source='falco' AND status='scored' AND deducted_points > 0
-              AND risk_expires_at IS NOT NULL AND risk_expires_at > ?
-            GROUP BY rule_name
-            """,
-            (now,),
-        ).fetchall()
-        active = sum(
-            min(int(row["points"] or 0), cap) if cap else int(row["points"] or 0)
-            for row in rows
-        )
+        if risks is None:
+            risks = runtime_risk_breakdown(db, self.config.get("runtime_rules", {}) or {}, now)
+        active = sum(item["points"] for item in risks)
         runtime = float(max(0, 100 - min(100, active)))
-        posture_value = state.get("posture_score")
+        baseline = baseline_snapshot(state)
+        posture_value = baseline.get("score") if baseline.get("status") == "ok" else None
         posture = float(posture_value) if posture_value is not None else None
-        weights = (self.config.get("scoring", {}) or {}).get("weights", {}) or {}
-        posture_weight = max(0.0, float(weights.get("posture", 0.4)))
-        runtime_weight = max(0.0, float(weights.get("runtime", 0.6)))
-        total = posture_weight + runtime_weight
-        if total == 0:
-            posture_weight, runtime_weight, total = 0.4, 0.6, 1.0
-        final = None if posture is None and posture_weight else round(
-            ((posture or 0) * posture_weight + runtime * runtime_weight) / total, 2
-        )
+        weights = weights if weights is not None else self.weights()
+        final = weighted_score(posture, runtime, weights)
         return {"final": final, "posture": posture, "runtime": runtime}
 
-    def _availability(self, state: Mapping[str, Any]) -> Dict[str, Any]:
+    def _availability(self, state: Mapping[str, Any], weights=None) -> Dict[str, Any]:
         heartbeat = float(state.get("fusion_heartbeat", 0))
         age = time.time() - heartbeat
         reasons = []
@@ -362,15 +383,16 @@ class DashboardData:
             reasons.append("falco-modern-bpf.service is not active")
         if not state.get("source_status", {}).get("falco", False):
             reasons.append("falco event log is unavailable")
+        time_error = state.get("runtime_time_error_at", 0)
+        if time_error and time_error >= state.get("runtime_valid_time_at", 0):
+            reasons.append("Falco event time is invalid; check host clock and log format")
         runtime_ready = not reasons
-        baseline = state.get("baseline_status", "unavailable")
-        weights = (self.config.get("scoring", {}) or {}).get("weights", {}) or {}
-        needs_baseline = float(weights.get("posture", 0.4)) > 0 or not any(
-            float(weights.get(key, default)) > 0 for key, default in
-            (("posture", 0.4), ("runtime", 0.6))
-        )
-        if needs_baseline and (baseline != "ok" or state.get("posture_score") is None):
-            reasons.append("Lynis baseline is unavailable")
+        baseline_details = baseline_snapshot(state)
+        baseline = baseline_details.get("status", "unavailable")
+        weights = weights if weights is not None else self.weights()
+        needs_baseline = weights['posture'] > 0
+        if needs_baseline and (baseline != "ok" or baseline_details.get("score") is None):
+            reasons.append("Lynis 基线不可用：" + "; ".join(baseline_details.get("errors") or ["等待完整、有效的扫描报告"]))
         return {"ready": not reasons, "runtime_ready": runtime_ready, "reason": "; ".join(reasons),
                 "baseline_status": baseline, "heartbeat": heartbeat or None}
 
@@ -381,6 +403,9 @@ class DashboardData:
         points = int(event.get("deducted_points", 0))
         labels = {
             "scored": f"TSA 已接收并计入风险：-{points} 分",
+            "risk_refreshed": "TSA 已接收：同规则风险续期，不叠加扣分（或总扣分已达 100）",
+            "expired": "TSA 已接收：事件在入库前已过计分有效期，仅保留证据",
+            "invalid_time": "TSA 已接收：事件时间异常，未计分；请检查主机时钟和日志格式",
             "duplicate": "TSA 已接收：命中去重窗口，不重复扣分",
             "rate_limited": "TSA 已接收：命中限速，不继续扣分",
             "maintenance": "TSA 已接收：维护窗口，仅记录不扣分",
@@ -454,23 +479,45 @@ class DashboardData:
             })
         return sorted(result, key=lambda x: parse_time(x["received_time"]), reverse=True)
 
-    def scores(self) -> Dict[str, Optional[float]]:
+    def weights(self):
+        return read_policy(self.config, getattr(self, 'config_dir', None))
+
+    def baseline(self):
+        with closing(self._connect()) as db:
+            return baseline_snapshot(self._state(db))
+
+    def set_weights(self, payload, actor):
+        if not isinstance(payload, dict) or set(payload) - {'posture', 'runtime', 'expected_version', 'reason'}:
+            raise ValueError('Unexpected weight configuration fields')
+        if not {'posture', 'runtime', 'expected_version'} <= set(payload):
+            raise ValueError('posture, runtime and expected_version are required')
+        return update_policy(self.config, self.config_dir, actor=actor, **payload)
+
+    def scores(self, include_weights=False):
         """Return only the current risk scores (lighter than snapshot())."""
         with closing(self._connect()) as db:
+            db.execute("BEGIN")
+            weights = self.weights()
             state = self._state(db)
-            availability = self._availability(state)
+            availability = self._availability(state, weights)
             if not availability["ready"]:
                 raise ValueError(availability["reason"])
-            return self._scores(db, state)
+            result = self._scores(db, state, weights=weights)
+            if include_weights:
+                result['weights'] = weights
+            return result
 
     def snapshot(self, *, before: int = 0, after: int = 0, pid: int = 0, query: str = "") -> Dict[str, Any]:
+        weights = self.weights()
         with closing(self._connect()) as db:
+            db.execute("BEGIN")
             state = self._state(db)
             events = self._events(db, limit=201, before=before, after=after, pid=pid, query=query)
             has_more = len(events) > 200
             events = events[:200]
-            scores = self._scores(db, state)
-        availability = self._availability(state)
+            risks = runtime_risk_breakdown(db, self.config.get("runtime_rules", {}) or {}, time.time())
+            scores = self._scores(db, state, risks=risks, weights=weights)
+        availability = self._availability(state, weights)
         if not availability["ready"]:
             scores["final"] = None
         if not availability["runtime_ready"]:
@@ -509,6 +556,9 @@ class DashboardData:
         return {
             "generated_time": utc_now(),
             "scores": scores,
+            "weights": weights,
+            "baseline": baseline_snapshot(state),
+            "runtime_risks": risks,
             "availability": availability,
             "pipeline": pipeline,
             "incidents": incidents,
@@ -521,6 +571,69 @@ class DashboardData:
 
 class DashboardHandler(BaseHTTPRequestHandler):
     server_version = "TSADashboard/1.0"
+
+    def _json(self, data, status=200):
+        self._send(json.dumps(data, ensure_ascii=False).encode('utf-8'),
+                   'application/json; charset=utf-8', status)
+
+    def _management_authorized(self):
+        self.close_connection = True
+        try:
+            host = urlparse('//' + self.headers.get('Host', '')).hostname
+        except ValueError:
+            host = None
+        if not is_loopback_host(host) or self.headers.get('Origin'):
+            self._json({'code': 40300, 'status': False, 'message': 'Server-to-server access required', 'data': None}, 403)
+            return False
+        token = os.environ.get('TSA_WEIGHTS_API_TOKEN', '')
+        if len(token) < 32:
+            self._json({'code': 50300, 'status': False, 'message': 'Weight management is not configured', 'data': None}, 503)
+            return False
+        values = self.headers.get_all('Authorization', [])
+        if len(values) != 1 or not hmac.compare_digest(values[0].encode(), ('Bearer ' + token).encode()):
+            self._json({'code': 40100, 'status': False, 'message': 'Unauthorized', 'data': None}, 401)
+            return False
+        return True
+
+    @staticmethod
+    def _unique_object(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError('Duplicate JSON field')
+            result[key] = value
+        return result
+
+    def do_PUT(self):
+        if urlparse(self.path).path != '/systemManage/risk/weights':
+            self._json({'error': 'not found'}, 404)
+            return
+        try:
+            lengths = self.headers.get_all('Content-Length', [])
+            if self.headers.get('Transfer-Encoding') or len(lengths) != 1:
+                raise ValueError('A single Content-Length is required')
+            length = int(lengths[0])
+            # Consume small bodies before rejecting/closing to avoid TCP resets
+            # hiding the HTTP error response on clients (notably Windows).
+            body = self.rfile.read(length) if 0 < length <= 8192 else b''
+            if not 0 < length <= 4096:
+                raise ValueError('Request body must be between 1 and 4096 bytes')
+            if not self._management_authorized():
+                return
+            if self.headers.get('Content-Type', '').split(';')[0].strip().lower() != 'application/json':
+                raise ValueError('Content-Type must be application/json')
+            if len(body) != length:
+                raise ValueError('Incomplete request body')
+            payload = json.loads(body, object_pairs_hook=self._unique_object)
+            actor = os.environ.get('TSA_WEIGHTS_API_CLIENT', 'main-system')
+            data = self.server.data.set_weights(payload, actor)  # type: ignore[attr-defined]
+            self._json({'code': 20000, 'status': True, 'message': '操作成功', 'data': data})
+        except VersionConflict as error:
+            self._json({'code': 40900, 'status': False, 'message': str(error), 'data': None}, 409)
+        except (ValueError, RecursionError) as error:
+            self._json({'code': 40000, 'status': False, 'message': str(error), 'data': None}, 400)
+        except (OSError, sqlite3.Error):
+            self._json({'code': 50300, 'status': False, 'message': 'Weights could not be saved', 'data': None}, 503)
 
     def log_message(self, fmt: str, *args: Any) -> None:
         print(f"{self.address_string()} - {fmt % args}")
@@ -551,6 +664,15 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self._send(b'{"error":"invalid host"}', "application/json", HTTPStatus.FORBIDDEN)
             return
         path = urlparse(self.path).path
+        if path == '/systemManage/risk/weights':
+            if not self._management_authorized():
+                return
+            try:
+                self._json({'code': 20000, 'status': True, 'message': '操作成功',
+                            'data': self.server.data.weights()})  # type: ignore[attr-defined]
+            except (OSError, sqlite3.Error, ValueError):
+                self._json({'code': 50300, 'status': False, 'message': 'Weights unavailable', 'data': None}, 503)
+            return
         if path == "/":
             self._send(HTML.encode("utf-8"), "text/html; charset=utf-8")
             return
@@ -587,11 +709,18 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     HTTPStatus.SERVICE_UNAVAILABLE,
                 )
             return
+        if path == "/systemManage/risk/baseline":
+            try:
+                data = self.server.data.baseline()
+                self._json({"code": 20000, "status": True, "message": "操作成功", "data": data})
+            except (OSError, sqlite3.Error, ValueError):
+                self._json({"code": 50300, "status": False, "message": "Baseline data unavailable", "data": None}, 503)
+            return
         if path == "/systemManage/risk/score":
             # Zero-trust management API: GET current risk scores.
             # Unified response envelope per 《零信任管理系统接口文档》.
             try:
-                data = self.server.data.scores()  # type: ignore[attr-defined]
+                data = self.server.data.scores(include_weights=True)  # type: ignore[attr-defined]
                 envelope = {
                     "code": 20000,
                     "status": True,
@@ -600,6 +729,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                         "final": data["final"],
                         "posture": data["posture"],
                         "runtime": data["runtime"],
+                        "weights": data["weights"],
                         "generated_time": utc_now(),
                     },
                 }

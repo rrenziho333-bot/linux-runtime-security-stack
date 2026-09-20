@@ -16,6 +16,7 @@ okfile.txt
 
 # Runtime data
 state/
+/tsa/settings/
 reports/
 __pycache__/
 *.pyc

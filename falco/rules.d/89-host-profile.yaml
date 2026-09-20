@@ -1,0 +1,466 @@
+# Default host profile: 29 official rules + the demo rule in 90-local-file-monitoring.yaml.
+# Keep upstream definitions/macros intact. Local additions in 91-custom-rules.yaml load later.
+- rule: "Directory traversal monitored file read"
+  enabled: true
+  override:
+    enabled: replace
+
+- rule: "Read sensitive file trusted after startup"
+  enabled: false
+  override:
+    enabled: replace
+
+- rule: "Read sensitive file untrusted"
+  enabled: true
+  override:
+    enabled: replace
+
+- rule: "Run shell untrusted"
+  enabled: true
+  override:
+    enabled: replace
+
+- rule: "System user interactive"
+  enabled: false
+  override:
+    enabled: replace
+
+- rule: "Terminal shell in container"
+  enabled: false
+  override:
+    enabled: replace
+
+- rule: "Contact K8S API Server From Container"
+  enabled: false
+  override:
+    enabled: replace
+
+- rule: "Netcat Remote Code Execution in Container"
+  enabled: false
+  override:
+    enabled: replace
+
+- rule: "Search Private Keys or Passwords"
+  enabled: true
+  override:
+    enabled: replace
+
+- rule: "Clear Log Activities"
+  enabled: true
+  override:
+    enabled: replace
+
+- rule: "Remove Bulk Data from Disk"
+  enabled: true
+  override:
+    enabled: replace
+
+- rule: "Create Symlink Over Sensitive Files"
+  enabled: true
+  override:
+    enabled: replace
+
+- rule: "Create Hardlink Over Sensitive Files"
+  enabled: true
+  override:
+    enabled: replace
+
+- rule: "Packet socket created in container"
+  enabled: false
+  override:
+    enabled: replace
+
+- rule: "Redirect STDOUT/STDIN to Network Connection in Container"
+  enabled: false
+  override:
+    enabled: replace
+
+- rule: "Linux Kernel Module Injection Detected"
+  enabled: true
+  override:
+    enabled: replace
+
+- rule: "Debugfs Launched in Privileged Container"
+  enabled: false
+  override:
+    enabled: replace
+
+- rule: "Detect release_agent File Container Escapes"
+  enabled: false
+  override:
+    enabled: replace
+
+- rule: "PTRACE attached to process"
+  enabled: true
+  override:
+    enabled: replace
+
+- rule: "PTRACE anti-debug attempt"
+  enabled: false
+  override:
+    enabled: replace
+
+- rule: "Find AWS Credentials"
+  enabled: false
+  override:
+    enabled: replace
+
+- rule: "Execution from /dev/shm"
+  enabled: true
+  override:
+    enabled: replace
+
+- rule: "Drop and execute new binary in container"
+  enabled: false
+  override:
+    enabled: replace
+
+- rule: "Disallowed SSH Connection Non Standard Port"
+  enabled: false
+  override:
+    enabled: replace
+
+- rule: "Fileless execution via memfd_create"
+  enabled: true
+  override:
+    enabled: replace
+
+- rule: "Unexpected inbound connection source"
+  enabled: false
+  override:
+    enabled: replace
+
+- rule: "Read Shell Configuration File"
+  enabled: false
+  override:
+    enabled: replace
+
+- rule: "Update Package Repository"
+  enabled: true
+  override:
+    enabled: replace
+
+- rule: "Write below binary dir"
+  enabled: true
+  override:
+    enabled: replace
+
+- rule: "Write below monitored dir"
+  enabled: true
+  override:
+    enabled: replace
+
+- rule: "Write below etc"
+  enabled: false
+  override:
+    enabled: replace
+
+- rule: "Write below root"
+  enabled: false
+  override:
+    enabled: replace
+
+- rule: "Write below rpm database"
+  enabled: false
+  override:
+    enabled: replace
+
+- rule: "Modify binary dirs"
+  enabled: true
+  override:
+    enabled: replace
+
+- rule: "Mkdir binary dirs"
+  enabled: false
+  override:
+    enabled: replace
+
+- rule: "Launch Sensitive Mount Container"
+  enabled: false
+  override:
+    enabled: replace
+
+- rule: "Launch Disallowed Container"
+  enabled: false
+  override:
+    enabled: replace
+
+- rule: "Interpreted procs inbound network activity"
+  enabled: false
+  override:
+    enabled: replace
+
+- rule: "Interpreted procs outbound network activity"
+  enabled: false
+  override:
+    enabled: replace
+
+- rule: "Unexpected K8s NodePort Connection"
+  enabled: false
+  override:
+    enabled: replace
+
+- rule: "Create Hidden Files or Directories"
+  enabled: false
+  override:
+    enabled: replace
+
+- rule: "Detect outbound connections to common miner pool ports"
+  enabled: false
+  override:
+    enabled: replace
+
+- rule: "Detect crypto miners using the Stratum protocol"
+  enabled: true
+  override:
+    enabled: replace
+
+- rule: "Kubernetes Client Tool Launched in Container"
+  enabled: false
+  override:
+    enabled: replace
+
+- rule: "Container Drift Detected (chmod)"
+  enabled: false
+  override:
+    enabled: replace
+
+- rule: "Container Drift Detected (open+create)"
+  enabled: false
+  override:
+    enabled: replace
+
+- rule: "Container Run as Root User"
+  enabled: false
+  override:
+    enabled: replace
+
+- rule: "Sudo Potential Privilege Escalation"
+  enabled: true
+  override:
+    enabled: replace
+
+- rule: "Unprivileged Delegation of Page Faults Handling to a Userspace Process"
+  enabled: false
+  override:
+    enabled: replace
+
+- rule: "Polkit Local Privilege Escalation Vulnerability (CVE-2021-4034)"
+  enabled: true
+  override:
+    enabled: replace
+
+- rule: "Java Process Class File Download"
+  enabled: false
+  override:
+    enabled: replace
+
+- rule: "Modify Container Entrypoint"
+  enabled: false
+  override:
+    enabled: replace
+
+- rule: "Decoding Payload in Container"
+  enabled: false
+  override:
+    enabled: replace
+
+- rule: "Basic Interactive Reconnaissance"
+  enabled: false
+  override:
+    enabled: replace
+
+- rule: "Netcat/Socat Remote Code Execution on Host"
+  enabled: true
+  override:
+    enabled: replace
+
+- rule: "Network Tool Executed During NPM Package Install"
+  enabled: false
+  override:
+    enabled: replace
+
+- rule: "Known Cryptominer Process Executed"
+  enabled: true
+  override:
+    enabled: replace
+
+- rule: "Web Server Spawned Shell"
+  enabled: true
+  override:
+    enabled: replace
+
+- rule: "Web Server Spawned Suspicious Child Process"
+  enabled: true
+  override:
+    enabled: replace
+
+- rule: "Reverse Shell from Web Server"
+  enabled: true
+  override:
+    enabled: replace
+
+- rule: "Privileged Container Device Access"
+  enabled: false
+  override:
+    enabled: replace
+
+- rule: "Container Access to Host Sensitive Paths"
+  enabled: false
+  override:
+    enabled: replace
+
+- rule: "Modify Shell Configuration File"
+  enabled: true
+  override:
+    enabled: replace
+
+- rule: "Schedule Cron Jobs"
+  enabled: false
+  override:
+    enabled: replace
+
+- rule: "Read ssh information"
+  enabled: false
+  override:
+    enabled: replace
+
+- rule: "DB program spawned process"
+  enabled: false
+  override:
+    enabled: replace
+
+- rule: "Change thread namespace"
+  enabled: false
+  override:
+    enabled: replace
+
+- rule: "Change namespace privileges via unshare"
+  enabled: false
+  override:
+    enabled: replace
+
+- rule: "Launch Privileged Container"
+  enabled: false
+  override:
+    enabled: replace
+
+- rule: "Launch Excessively Capable Container"
+  enabled: false
+  override:
+    enabled: replace
+
+- rule: "System procs network activity"
+  enabled: false
+  override:
+    enabled: replace
+
+- rule: "Program run with disallowed http proxy env"
+  enabled: false
+  override:
+    enabled: replace
+
+- rule: "Unexpected UDP Traffic"
+  enabled: false
+  override:
+    enabled: replace
+
+- rule: "Non sudo setuid"
+  enabled: false
+  override:
+    enabled: replace
+
+- rule: "User mgmt binaries"
+  enabled: false
+  override:
+    enabled: replace
+
+- rule: "Create files below dev"
+  enabled: false
+  override:
+    enabled: replace
+
+- rule: "Contact EC2 Instance Metadata Service From Container"
+  enabled: false
+  override:
+    enabled: replace
+
+- rule: "Contact cloud metadata service from container"
+  enabled: false
+  override:
+    enabled: replace
+
+- rule: "Launch Package Management Process in Container"
+  enabled: false
+  override:
+    enabled: replace
+
+- rule: "Launch Suspicious Network Tool in Container"
+  enabled: false
+  override:
+    enabled: replace
+
+- rule: "Launch Suspicious Network Tool on Host"
+  enabled: false
+  override:
+    enabled: replace
+
+- rule: "Delete or rename shell history"
+  enabled: true
+  override:
+    enabled: replace
+
+- rule: "Set Setuid or Setgid bit"
+  enabled: true
+  override:
+    enabled: replace
+
+- rule: "Launch Remote File Copy Tools in Container"
+  enabled: false
+  override:
+    enabled: replace
+
+- rule: "Network Connection outside Local Subnet"
+  enabled: false
+  override:
+    enabled: replace
+
+- rule: "Mount Launched in Privileged Container"
+  enabled: false
+  override:
+    enabled: replace
+
+- rule: "Launch Ingress Remote File Copy Tools in Container"
+  enabled: false
+  override:
+    enabled: replace
+
+- rule: "Read environment variable from /proc files"
+  enabled: false
+  override:
+    enabled: replace
+
+- rule: "Exfiltrating Artifacts via Kubernetes Control Plane"
+  enabled: false
+  override:
+    enabled: replace
+
+- rule: "Adding ssh keys to authorized_keys"
+  enabled: true
+  override:
+    enabled: replace
+
+- rule: "Potential Local Privilege Escalation via Environment Variables Misuse"
+  enabled: true
+  override:
+    enabled: replace
+
+- rule: "Backdoored library loaded into SSHD (CVE-2024-3094)"
+  enabled: false
+  override:
+    enabled: replace
+
+- rule: "BPF Program Not Profiled"
+  enabled: false
+  override:
+    enabled: replace
