@@ -22,7 +22,7 @@ import yaml
 
 from weight_policy import read_policy, final_score as weighted_score
 from baseline_scoring import baseline_snapshot, read_report, score_report
-from runtime_context import advisory_reason, apply_signal_budget
+from runtime_context import advisory_reason, apply_signal_budget, score_effect, validate_runtime_config
 
 
 LOG = logging.getLogger(__name__)
@@ -392,6 +392,7 @@ class RulePolicy:
 class RiskScorer:
     def __init__(self, config: Mapping[str, Any], store: StateStore, config_dir: Optional[Path] = None):
         self.config = config
+        validate_runtime_config(config.get('runtime_rules', {}) or {})
         self.store = store
         self.config_dir = config_dir
         posture = store.get("posture_score", None)
@@ -564,6 +565,7 @@ class RiskScorer:
         risk_ttl_seconds = 0
         risk_points = None
         expires_at = None
+        effect = None
         runtime_cfg = self.config.get("runtime_rules", {}) or {}
 
         if suppress_scoring:
@@ -614,7 +616,8 @@ class RiskScorer:
                         projected = [item for item in active if item['rule'] != rule]
                         projected.append({'rule': rule, 'points': max(previous, contribution)})
                         after = sum(item['points'] for item in apply_signal_budget(projected, runtime_cfg))
-                        admitted = max(0, min(100, after) - min(100, before))
+                        effect = score_effect(previous, contribution, before, after)
+                        admitted = effect['deducted_points']
                         status = "scored" if admitted else "risk_refreshed"
             else:
                 risk_ttl_seconds = policy.risk_ttl_seconds
@@ -632,6 +635,7 @@ class RiskScorer:
             "priority": priority,
             "tags": tags,
             "reason": reason,
+            "score_effect": effect,
             "risk_points": risk_points,
             "scoring_model": runtime_cfg.get("aggregation", "sum_capped"),
             "occurrence_count": count,
@@ -646,7 +650,7 @@ class RiskScorer:
             "syscall_result": output_fields.get("evt.rawres"),
             "file": output_fields.get("fd.name", ""),
             "command": output_fields.get("proc.cmdline", ""),
-            "container_id": output_fields.get("container.id", "host"),
+            "container_id": output_fields.get("container.id"),
         }
         self.store.record_event(
             received_time=received_time,

@@ -121,8 +121,9 @@ class HostProfileTests(unittest.TestCase):
 
     def test_documented_runtime_weights_match_deployed_configuration(self):
         text = (ROOT / 'docs/FALCO_RULES_README.md').read_text(encoding='utf-8')
-        for rule, policy in self.config['runtime_rules']['specific_rules'].items():
-            self.assertIn(f'| `{rule}` | {policy["points"]} |', text)
+        for rule, policy in CONFIG['runtime_rules']['specific_rules'].items():
+            value = f'实际 0；独立验收 {policy["points"]}' if policy.get('test_only') else str(policy['points'])
+            self.assertIn(f'| `{rule}` | {value} |', text)
 
     def test_different_rules_add_and_full_high_risk_is_not_minute_truncated(self):
         self.assertEqual(self.emit('Reverse Shell from Web Server')['deducted_points'], 20)

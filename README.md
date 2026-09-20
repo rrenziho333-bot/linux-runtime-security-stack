@@ -25,7 +25,7 @@ Falco 使用 modern eBPF 采集系统调用，不需要本项目原有的 BPF LS
 
 支持 Ubuntu 22.04 x86_64。按安装指南准备依赖、克隆并部署，部署自动生成 Lynis 报告；`git clone` 本身不会启动服务。
 
-**验证（2026-09-20）**：在既有 2IIE-OS（Ubuntu 22.04.5、Falco 0.44.1）通过 141 项回归，验证了真实系统读取免扣分、演示告警独立计分、评分接口对账。未重新验证新装系统，也未逐条攻击实测全部规则。
+**验证（2026-09-20）**：在既有 2IIE-OS（Ubuntu 22.04.5、Falco 0.44.1）通过 148 项回归，验证了真实系统读取免扣分、演示告警独立计分、评分接口对账。未重新验证新装系统，也未逐条攻击实测全部规则。
 
 上一版 `17037ca` 已在全新 Ubuntu Server 22.04.5 云镜像（5.15.0-190 内核）完成克隆部署和重启验证；该结论不替代当前版本的全新系统验证。不需要 Go、BPF LSM 或修改 GRUB。
 
@@ -45,6 +45,7 @@ Falco 使用 modern eBPF 采集系统调用，不需要本项目原有的 BPF LS
 | `falco/rules.d/` | 默认规则开关、演示规则、自定义入口和组件告警例外 |
 | `tsa/tsa_fusion.py`、`tsa/tsa_core.py` | TSA 启动入口、基线读取、事件计分和 SQLite 持久化 |
 | `tsa/baseline_scoring.py` | Lynis 证据解析、逐检查项计分、执行覆盖与报告有效期 |
+| `tsa/runtime_context.py` | 严格上下文校验、弱线索预算和新增扣分原因；不按程序名统一免扣分 |
 | `tsa/refresh_baseline.py`、`systemd/tsa-baseline.*` | root 定时扫描、验证并原子发布统一基线报告 |
 | `tsa/tsa_dashboard.py` | 只读网页、健康和评分 API、认证权重管理 API |
 | `tsa/weight_policy.py` | 权重校验、持久化、版本历史与综合分统一计算 |

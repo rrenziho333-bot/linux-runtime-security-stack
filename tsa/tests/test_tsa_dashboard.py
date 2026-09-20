@@ -204,6 +204,25 @@ runtime_rules:
             event = data._events(db)[0]
         self.assertEqual((event["id"], event["source"], event["deducted_points"]), (1, "falco", 0))
 
+    def test_processing_steps_do_not_confuse_historical_and_current_deductions(self):
+        event = {'status':'scored', 'deducted_points':10}
+        self.assertIn('历史新增扣分 10', DashboardData._tsa_step(event))
+        event['current_policy_note'] = '已匹配只读系统上下文'
+        self.assertIn('当前策略不计风险', DashboardData._tsa_step(event))
+        self.assertIn('历史扣分 10', DashboardData._tsa_step(event))
+        self.assertIn('旧记录未保存', DashboardData._tsa_step({'status':'risk_refreshed'}))
+        self.assertIn('测试封顶原因', DashboardData._tsa_step({
+            'status':'risk_refreshed', 'score_effect':{'explanation':'测试封顶原因'}}))
+
+    def test_expired_evidence_keeps_history_but_explains_current_exclusion(self):
+        self.insert_event(source='falco', rule='test', payload={}, points=10, expires=time.time() - 1)
+        data = DashboardData(self.config)
+        with data._connect() as db:
+            event = data._events(db)[0]
+        self.assertEqual(event['deducted_points'], 10)
+        self.assertEqual(event['status'], 'scored')
+        self.assertIn('不代表风险已经处置', event['current_policy_note'])
+
 
 if __name__ == "__main__":
     unittest.main()

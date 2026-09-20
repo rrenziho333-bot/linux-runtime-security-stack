@@ -8,7 +8,7 @@ from pathlib import Path
 
 import yaml
 
-from runtime_context import advisory_reason, apply_signal_budget
+from runtime_context import advisory_reason, apply_signal_budget, score_effect, validate_runtime_config
 from tsa_core import RiskScorer, StateStore, runtime_risk_breakdown
 from verify_runtime import RULE, score_test_evidence
 
@@ -154,6 +154,62 @@ class ContextScoringTests(unittest.TestCase):
             runtime['signal_budget']['max_points'] = cap
             with self.assertRaises(ValueError):
                 apply_signal_budget([], runtime)
+
+    def test_missing_host_identity_is_not_invented_during_storage(self):
+        policy = self.config['runtime_rules']['context_advisories'][1]
+        evidence = self.context(policy)
+        evidence.pop('container_id')
+        result = self.emit(policy['rule'], evidence)
+        self.assertEqual(result['deducted_points'], 5)
+        self.assertEqual(self.scorer.runtime_score, 95)
+        stored = json.loads(self.store.db.execute('SELECT payload FROM events').fetchone()[0])
+        self.assertIsNone(stored['container_id'])
+        self.scorer.refresh_runtime_score(self.now + 1)
+        self.assertEqual(self.scorer.runtime_score, 95)
+
+    def test_all_advisories_are_validated_even_after_a_match(self):
+        runtime = copy.deepcopy(self.config['runtime_rules'])
+        runtime['context_advisories'].append({'rule':'typo', 'match':{}})
+        first = runtime['context_advisories'][0]
+        with self.assertRaises(ValueError):
+            advisory_reason(first['rule'], self.context(first), runtime)
+
+    def test_bad_rule_references_and_duplicates_fail_at_startup(self):
+        for section in ('context_advisories', 'signal_budget'):
+            cfg = copy.deepcopy(self.config)
+            if section == 'context_advisories':
+                cfg['runtime_rules'][section][0]['rule'] = 'misspelled rule'
+            else:
+                cfg['runtime_rules'][section]['rules'].append('misspelled rule')
+            with self.subTest(section=section), self.assertRaises(ValueError):
+                RiskScorer(cfg, self.store)
+        runtime = copy.deepcopy(self.config['runtime_rules'])
+        runtime['signal_budget']['rules'].append(runtime['signal_budget']['rules'][0])
+        with self.assertRaises(ValueError):
+            validate_runtime_config(runtime)
+
+    def test_marginal_deduction_causes_distinguish_all_caps(self):
+        for args, causes, points in [
+            ((5, 5, 15, 15), ['same_rule_active'], 0),
+            ((0, 5, 15, 15), ['weak_signal_budget'], 0),
+            ((0, 15, 100, 115), ['runtime_score_floor'], 0),
+            ((0, 10, 98, 103), ['weak_signal_budget', 'runtime_score_floor'], 2),
+            ((0, 10, 0, 10), [], 10),
+        ]:
+            with self.subTest(args=args):
+                effect = score_effect(*args)
+                self.assertEqual(effect['causes'], causes)
+                self.assertEqual(effect['deducted_points'], points)
+
+    def test_zero_deduction_explanation_is_persisted(self):
+        self.emit('Known Cryptominer Process Executed')
+        repeated = self.emit('Known Cryptominer Process Executed')
+        self.assertEqual(repeated['score_effect']['causes'], ['same_rule_active'])
+        self.emit('Detect crypto miners using the Stratum protocol')
+        capped = self.emit('Remove Bulk Data from Disk')
+        self.assertEqual(capped['score_effect']['causes'], ['weak_signal_budget'])
+        payload = json.loads(self.store.db.execute('SELECT payload FROM events ORDER BY id DESC').fetchone()[0])
+        self.assertEqual(payload['score_effect'], capped['score_effect'])
 
 
 if __name__ == '__main__':

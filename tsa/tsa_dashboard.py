@@ -24,7 +24,7 @@ from urllib.parse import parse_qs, urlparse
 import yaml
 
 from tsa_core import parse_event_time, runtime_risk_breakdown
-from runtime_context import advisory_reason
+from runtime_context import advisory_reason, validate_runtime_config
 from baseline_scoring import baseline_snapshot
 from weight_policy import read_policy, update_policy, VersionConflict, final_score as weighted_score
 
@@ -148,6 +148,7 @@ function renderEvidence(source,item){
     el("div","subline","TSA 入库："+formatTime(item.received_time)),el("div","subline",(statusNames[item.status]||item.status)+" · 历史扣分 "+item.deducted_points));
   if(item.risk_expires_at)row.append(el("div","subline","计分到期："+formatTime(new Date(item.risk_expires_at*1000).toISOString())));
   if(item.reason)row.append(el("div","subline","依据："+item.reason));
+  if(item.score_effect)row.append(el("div","subline","入库时计分："+item.score_effect.explanation));
   if(item.current_policy_note)row.append(el("div","subline","当前策略："+item.current_policy_note+"；历史记录保持原样"));
   if(item.risk_points!=null)row.append(el("div","subline","规则风险值："+item.risk_points+" · 本次新增扣分："+item.deducted_points));
   if(item.file)row.append(el("div","subline","文件："+item.file));
@@ -200,8 +201,8 @@ function render(){
   else if(!(current.runtime_risks||[]).length)risk.append(el("div","empty","当前没有计分中的规则风险"));
   else{
     const total=current.runtime_risks.reduce((n,r)=>n+r.points,0);
-    risk.append(el("div","evidence-row","规则风险合计 "+total+"，运行时评分 "+Math.max(0,100-total)));
-    current.runtime_risks.forEach(r=>{const row=el("div","evidence-row");row.append(el("strong","",r.rule+" · 当前贡献 −"+r.points),el("div","subline",r.reason),el("div","subline",r.evidence_count+" 条有效证据 · 最晚到期："+formatTime(new Date(r.expires_at*1000).toISOString())));if(r.budget_limit!=null)row.append(el("div","subline","规则风险值 "+r.rule_points+"；"+r.budget_reason+"。按风险值从高到低分配，相同时按规则名排序。"));risk.append(row)});
+    risk.append(el("div","evidence-row","规则风险合计 "+total+"；当前实际扣分 "+Math.min(100,total)+"；运行时评分 "+Math.max(0,100-total)));
+    current.runtime_risks.forEach(r=>{const row=el("div","evidence-row");row.append(el("strong","",r.rule+" · 预算后风险值 "+r.points),el("div","subline",r.reason),el("div","subline",r.evidence_count+" 条有效证据 · 最晚到期："+formatTime(new Date(r.expires_at*1000).toISOString())));if(r.budget_limit!=null)row.append(el("div","subline","规则风险值 "+r.rule_points+"；"+r.budget_reason+"。按风险值从高到低分配，相同时按规则名排序。"));risk.append(row)});
   }
   $("#refresh").textContent="页面刷新："+formatTime(current.generated_time);
   $("#zone-label").textContent="显示时区："+zone();
@@ -294,6 +295,7 @@ class DashboardData:
         self.config_dir = tsa_config.parent
         with tsa_config.open("r", encoding="utf-8") as stream:
             self.config = yaml.safe_load(stream) or {}
+        validate_runtime_config(self.config.get('runtime_rules', {}) or {})
         storage = self.config.get("storage", {}) or {}
         state_db = Path(str(storage.get("state_db", "state/tsa.db"))).expanduser()
         self.state_db = state_db if state_db.is_absolute() else tsa_config.parent / state_db
@@ -329,6 +331,7 @@ class DashboardData:
             (before, before, after, pid, pid, query, query, limit),
         ).fetchall()
         events = []
+        now = time.time()
         for row in rows:
             try:
                 payload = json.loads(row["payload"])
@@ -341,6 +344,12 @@ class DashboardData:
             policy = (runtime.get('specific_rules', {}) or {}).get(row['rule_name'], {})
             if isinstance(policy, dict) and policy.get('test_only'):
                 note = '专用验收规则，不计实际风险'
+            elif (isinstance(policy, dict) and not policy.get('enabled', True)) or (
+                    runtime.get('unmapped_rule_action') == 'record_only'
+                    and row['rule_name'] not in (runtime.get('specific_rules', {}) or {})):
+                note = '当前没有启用此规则的计分策略'
+            elif not note and row['risk_expires_at'] and row['risk_expires_at'] <= now:
+                note = '证据已离开计分观察窗口；不代表风险已经处置'
             if note:
                 payload['current_policy_note'] = note
             events.append(
@@ -410,9 +419,13 @@ class DashboardData:
     def _tsa_step(event: Mapping[str, Any]) -> str:
         status = str(event.get("status", "unknown"))
         points = int(event.get("deducted_points", 0))
+        if event.get('current_policy_note'):
+            return f"当前策略不计风险：{event['current_policy_note']}；入库时历史扣分 {points}，保留原记录"
+        if event.get('score_effect') and status in ('scored', 'risk_refreshed'):
+            return f"入库时新增扣分 {points}：{event['score_effect']['explanation']}；当前贡献见运行时扣分明细"
         labels = {
-            "scored": f"TSA 已接收并计入风险：-{points} 分",
-            "risk_refreshed": "TSA 已接收：同规则续期、弱线索预算或总分封顶，不新增扣分",
+            "scored": f"入库时历史新增扣分 {points}；不代表当前扣分，当前贡献见运行时扣分明细",
+            "risk_refreshed": "入库时未新增扣分；旧记录未保存具体封顶原因，当前贡献见运行时扣分明细",
             "context_advisory": "符合已配置的系统读取上下文；保留证据，不计入实际风险",
             "test_event": "专用验收事件；保留证据，不计入实际风险",
             "expired": "TSA 已接收：事件在入库前已过计分有效期，仅保留证据",
