@@ -1,10 +1,8 @@
 # Ubuntu 复现指南
 
-适用 Ubuntu 22.04 x86_64、systemd、可 sudo 的普通用户。建议虚拟机 2 核、4 GB 内存，操作前做快照。
-在 Ubuntu 的普通用户终端逐条执行；提示 sudo 密码时输入该用户密码。项目放在用户家目录，路径不要含空格或中文；需要能访问 Ubuntu 软件源、Falco 软件源和 GitHub。
-本项目只做 **Lynis 基线检测 + Falco 告警 + TSA 评分**，不阻断、不终止进程；无需安装 Go 或启用 BPF LSM。
+环境：Ubuntu 22.04 x86_64（systemd），使用可 sudo 的普通用户，网络能访问 Ubuntu、Falco 软件源和 GitHub。项目放在用户家目录，路径不含空格或中文。
 
-验证范围：上一版 `17037ca` 在全新 Ubuntu Server 22.04.5（5.15.0-190 内核）完成克隆部署及重启验证。当前版本于 2026-09-20 在 2IIE-OS（Ubuntu 22.04.5、6.8.0-60 内核）通过 120 项回归、真实部署扫描、定时扫描自动更新评分及告警扣分验收。9 月 18 日另验证了 3 条规则、权重接口和故障恢复。当前版本没有重新在新装系统验证，也不是全部 30 条规则攻击实测；不同主机仍须完成第 4 节验收。
+功能：**Lynis 基线检测 + Falco 告警 + TSA 评分**。
 
 ## 1. 准备依赖
 
@@ -98,7 +96,7 @@ systemctl is-active falco-modern-bpf tsa-fusion tsa-dashboard
 curl --fail --retry 12 --retry-delay 2 --retry-connrefused --noproxy '*' http://127.0.0.1:8766/healthz
 ```
 
-重试后仍失败，先查看 4.5 的日志，不继续验收。部署会预建空日志，安静的主机无需先触发报警才能就绪。
+健康检查失败时，先处理错误再继续。
 
 **命令 4.3：真实触发一次文件写入告警。**
 ```bash
@@ -112,21 +110,7 @@ python3 tsa/verify_runtime.py
 curl --fail --noproxy '*' http://127.0.0.1:8766/systemManage/risk/score
 ```
 
-在 **Ubuntu 浏览器**打开 `http://127.0.0.1:8766/`。没有图形桌面时使用下方 SSH 转发，勿直接开放看板端口。分数随主机配置和告警变化，不要求固定数值；SSH 登录等正常活动也可能命中规则，需结合证据判断。
-
-**命令 4.5（排障）：查看日志。**
-```bash
-journalctl -u falco-modern-bpf -u tsa-fusion -u tsa-dashboard -n 80 --no-pager
-```
-
-服务 active 不是完整验收；还要看到本次 Falco 告警入库与有效评分。此测试不代表所有规则逐条攻击验证。
-
-**命令 4.6（可选，Windows 终端）：Ubuntu 已启用 SSH 时转发看板。将 USER、UBUNTU_IP 替换为实际用户名和地址。**
-```bash
-ssh -N -L 127.0.0.1:18768:127.0.0.1:8766 USER@UBUNTU_IP
-```
-
-保持该终端打开，在 Windows 浏览器访问 `http://127.0.0.1:18768/`；查看 4.3 的事件链接时也将端口改为 `18768`。
+在 **Ubuntu 浏览器**打开 `http://127.0.0.1:8766/` 查看分数和告警。
 
 ### 实时观察扣分
 
@@ -152,44 +136,6 @@ echo "manual-score-test-$(date +%s)" | sudo tee -a /etc/tsa-protected-demo
 | 最后一次触发后 15 分钟无新命中 | 该规则的 1 分退出当前计分，历史证据保留 |
 
 其他进程可能同时触发规则或风险到期，因此总分变化未必恰好是 1；以脚本的“本规则当前风险”和网页逐规则明细对账。总分已到 0 时不能继续下降。不要删除数据库或修改报告时间来制造满分。
-
-本次 2IIE-OS 实测：基线 85，原有其他风险占 5 分；首次演示写入使运行时 **95 → 94**、综合分 **91 → 90.4**，再次写入分数不变。自动补扫更新了报告，TSA 进程未重启也接收到了新基线。
-
-### 部署后哪些步骤自动运行
-
-| 环节 | 触发方式 | 结果 |
-|---|---|---|
-| Falco 监测 | 开机启动，持续读取系统调用 | 命中启用规则才写入告警 |
-| TSA 运行时计分 | 自动读取新增告警，轮询间隔 1 秒 | 入库、更新规则风险；无需手动启动评分 |
-| Lynis 基线扫描 | 部署时一次；每天 00/06/12/18 点及开机约 2 分钟后，最多随机延迟 1 分钟 | 先更新 APT 索引，再扫描、验证并原子替换统一报告 |
-| TSA 基线计分 | 自动每 30 秒重读报告 | 新报告成功发布后约 30 秒内更新，无需重启 TSA |
-| 综合分、网页、接口 | 按当前基线、未过期风险及实际权重计算 | 主系统主动查询评分接口 |
-
-定时任务会补执行关机时错过的日历计划；失败不覆盖上一份完整报告，下一计划会重试。旧报告超过 24 小时仍无成功扫描时显示未评估，不使用旧分数冒充当前分数。
-
-**命令 4.7：检查自动扫描计划，预期存在 NEXT 时间。**
-```bash
-systemctl list-timers --all tsa-baseline.timer
-```
-
-**命令 4.8：现在重新扫描，等待完成；这不是重启常驻服务。**
-```bash
-sudo systemctl start tsa-baseline.service
-```
-
-扫描结束后 service 显示 `inactive (dead)` 可以是正常的，因为它是一次性任务；定时器应为 `active (waiting)`。判断扫描成败看以下日志与报告，而非要求扫描服务一直 active。
-
-**命令 4.9：查看最近扫描结果；另开终端将 `-n 60` 换成 `-f` 可实时跟踪。**
-```bash
-sudo journalctl -u tsa-baseline.service -n 60 --no-pager
-```
-
-**命令 4.10：查看 TSA 实际采用的报告与扫描时间，预期 data.status 为 ok。**
-```bash
-curl --fail --noproxy '*' -sS http://127.0.0.1:8766/systemManage/risk/baseline | jq '.data | {status,score,scan_end_local,report_path,errors}'
-```
-
-首次扫描或故障排查期间，在新报告发布后等最多 30 秒再查；若仍不可用，按 `errors` 和 4.9 排查 APT、扫描或报告问题，不关闭报告有效期检查。
 
 ## 5. 更新与配置
 
@@ -238,7 +184,7 @@ Lynis 仍执行适用于本机的系统检查；不是只检查下表。TSA 从 
 
 **查看依据：**看板“基线检查与扣分明细”，或 `GET /systemManage/risk/baseline`。包括原文、建议、扣分、执行/跳过记录、报告时间和报告列出的风险软件包/账号；不按软件包或账号数量累加扣分，软件包列表也不等于已验证的 CVE。证据同时保存在 `tsa/reports/last_scan.json` 的 `baseline` 中。
 
-**检查范围：**执行和跳过的 ID 来自报告 `tests_executed` / `tests_skipped`；执行过不代表所有子检查成功。缺少执行记录，或 AUTH-9204、AUTH-9283、PKGS-7392 未执行/异常时基线未评估。其他计分项报告 exception 时也未评估。报告默认 24 小时过期；自动扫描与手动更新见 4.7～4.10。
+**检查范围：**执行和跳过的 ID 来自报告 `tests_executed` / `tests_skipped`；执行过不代表所有子检查成功。缺少执行记录，或 AUTH-9204、AUTH-9283、PKGS-7392 未执行/异常时基线未评估。其他计分项报告 exception 时也未评估。报告默认 24 小时过期。
 
 **检查代码与配置：**Ubuntu 软件包通常将测试放在 `/usr/share/lynis/include/tests_*`，活动 profile 用 `sudo lynis show profiles` 查看，按需修改 `custom.prf`；不直接改 Lynis 自带测试。完整执行及跳过原因看 `/var/lib/tsa-baseline/lynis.log`（每次扫描覆盖）。`PKGS-7392` 依赖 APT 索引和 apt-check（`update-notifier-common` 提供）；自动扫描前严格检查 APT 更新成功，否则保留旧报告并报错，不生成新的“正常”基线。
 
