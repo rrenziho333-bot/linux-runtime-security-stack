@@ -73,14 +73,14 @@ cd linux-runtime-security-stack
 timedatectl
 ```
 
-**命令 3.4：部署，等待命令返回；首次基线扫描可能需要数分钟。**
+**命令 3.4：部署项目，首次运行需等待数分钟。**
 ```bash
 sudo ./deploy-security-stack.sh
 ```
 
-部署自动运行回归测试、安装 30 条启用规则、刷新 APT 索引、完成首次 Lynis 扫描、安装定时器并启动服务。扫描失败时部署报错，先修复原因再重试，不把失败当作部署成功。`long execution` 仅表示某项检查较慢。
+自动检查程序、启用 30 条规则、完成首次基线扫描并启动服务，后续扫描定时执行。命令结束且无报错后，继续第 4 节；`long execution` 只是检查较慢，请继续等待。
 
-不再手动生成项目目录里的报告；统一报告为 `/var/lib/tsa-baseline/lynis-report.dat`，由 root 生成，TSA 通过 adm 组只读。部署会停用软件包自带的 `lynis.timer`，改由本项目定时器接管，避免扫描与评分读取不同文件。
+基线报告自动保存到 `/var/lib/tsa-baseline/lynis-report.dat`，无需手动生成。
 
 ## 4. 验收
 
@@ -98,12 +98,14 @@ curl --fail --retry 12 --retry-delay 2 --retry-connrefused --noproxy '*' http://
 
 健康检查失败时，先处理错误再继续。
 
-**命令 4.3：真实触发一次文件写入告警。**
+**命令 4.3：测试告警和扣分流程。**
 ```bash
 python3 tsa/verify_runtime.py
 ```
 
-脚本仅向已有 `/etc/tsa-protected-demo` 追加一行测试编号。预期输出 PID、事件链接、`Monitor specific file access`、独立验收分数 `100 → 99` 和 `PASS`。真实告警入库，但该专用验收规则不扣实际分；独立计分使用本次真实证据和临时数据库，结束后自动删除临时库。
+脚本向演示文件 `/etc/tsa-protected-demo` 追加一行内容，触发 `Monitor specific file access` 告警。
+
+终端显示测试分数 `100 → 99` 和 `PASS`，表示本次验收通过。告警会显示在网页中；扣分仅在独立测试中验证，**不降低实际分数**。
 
 **命令 4.4：读取评分，预期 HTTP 200、data 非空。**
 ```bash
