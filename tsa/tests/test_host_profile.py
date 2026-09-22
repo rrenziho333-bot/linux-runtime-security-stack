@@ -28,8 +28,6 @@ class HostProfileTests(unittest.TestCase):
         self.store = StateStore(Path(self.temp.name) / 'state.db')
         self.addCleanup(self.store.close)
         self.config = copy.deepcopy(CONFIG)
-        # Generic timing/accounting tests exercise an explicitly scored demo policy.
-        self.config['runtime_rules']['specific_rules']['Monitor specific file access']['test_only'] = False
         self.scorer = RiskScorer(self.config, self.store)
         self.now = time.time()
 
@@ -134,7 +132,7 @@ class HostProfileTests(unittest.TestCase):
         rule = 'Monitor specific file access'
         self.emit(rule)
         result = self.emit(rule, when=self.now + 901, received=self.now + 901)
-        self.assertEqual(result['deducted_points'], 1)
+        self.assertEqual(result['deducted_points'], 10)
         self.assertEqual(result['status'], 'scored')
 
     def test_delayed_event_uses_occurrence_time_not_ingestion_time(self):
@@ -168,7 +166,7 @@ class HostProfileTests(unittest.TestCase):
         event['time'] = datetime.fromtimestamp(self.now, timezone.utc).strftime('%Y-%m-%dT%H:%M:%S.%f') + '484Z'
         result = self.scorer.process_falco_event(event, received_at=self.now)
         self.assertEqual(result['status'], 'scored')
-        self.assertEqual(result['deducted_points'], 1)
+        self.assertEqual(result['deducted_points'], 10)
 
     @patch('tsa_dashboard.service_state', return_value='active')
     def test_invalid_time_marks_monitoring_unavailable_until_valid_evidence(self, _service):

@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""Write only the existing demo file, then locate this attempt's durable evidence."""
+"""Run a harmless, real-scoring probe and verify its durable Falco evidence."""
 
 import argparse
-import copy
 import errno
 import json
 import os
+import shlex
 import sqlite3
 import stat
 import subprocess
@@ -16,11 +16,12 @@ from contextlib import closing
 from pathlib import Path
 
 from tsa_dashboard import DashboardData
-from tsa_core import RiskScorer, StateStore, parse_event_time
+from tsa_core import parse_event_time
 
 
 TARGET = Path("/etc/tsa-protected-demo")
 RULE = "Monitor specific file access"
+SHM_RULE = "Execution from /dev/shm"
 
 
 def write_demo(token, device, inode):
@@ -45,8 +46,41 @@ def write_demo(token, device, inode):
     return 0
 
 
-def evaluate(events, attempt):
+def run_shm_demo():
+    # A fresh private directory prevents replacement by other local users.
+    # Interpreting this harmless script also works on a noexec /dev/shm mount.
+    with tempfile.TemporaryDirectory(prefix='lrss-score-', dir='/dev/shm') as directory:
+        target = Path(directory) / 'probe.sh'
+        target.write_text('exit 0\n', encoding='ascii')
+        with subprocess.Popen(['/bin/sh', str(target)], stdout=subprocess.PIPE, stderr=subprocess.PIPE) as process:
+            try:
+                _, error = process.communicate(timeout=10)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.communicate()
+                raise
+            return {'pid': process.pid, 'file': str(target),
+                    'outcome': 'executed' if process.returncode == 0 else 'error',
+                    'error': error.decode('utf-8', errors='replace').strip()}
+
+
+def evaluate(events, attempt, rule=RULE):
+    if rule == SHM_RULE:
+        matched = []
+        for event in events:
+            if (event.get('source') != 'falco' or event.get('rule') != rule
+                    or str(event.get('pid')) != str(attempt['pid'])
+                    or event.get('syscall') not in ('execve', 'execveat')):
+                continue
+            try:
+                command = shlex.split(str(event.get('command', '')))
+            except ValueError:
+                continue
+            if len(command) == 2 and command[1] == attempt['file']:
+                matched.append(event)
+        return attempt['outcome'] == 'executed' and bool(matched), matched
     falco = [e for e in events if e.get("source") == "falco"
+             and e.get('rule') == rule
              and str(e.get("pid")) == str(attempt["pid"])
              and e.get("file") == TARGET.as_posix()
              and (e.get("syscall") in ("write", "writev", "pwrite", "pwritev")
@@ -54,12 +88,12 @@ def evaluate(events, attempt):
     return attempt["outcome"] == "written" and bool(falco), falco
 
 
-def check_probe_times(events, started, finished):
+def check_probe_times(events, started, finished, rule=RULE):
     """A known, just-executed probe must not be mistaken for historical backlog."""
     if finished < started:
         raise ValueError("测试期间系统时间回退；校时后重新执行验收")
     for event in events:
-        if event.get("rule") != RULE:
+        if event.get("rule") != rule:
             continue
         try:
             timestamp = parse_event_time(event.get("event_time", ""))
@@ -72,32 +106,10 @@ def check_probe_times(events, started, finished):
                 "再重新验收。虚拟机挂起恢复后尤其需要检查；不要延长告警有效期来绕过此错误。")
 
 
-def score_test_evidence(config, event):
-    """Replay captured demo evidence in a disposable database, not the live score."""
-    isolated = copy.deepcopy(config)
-    isolated['runtime_rules']['specific_rules'][RULE]['test_only'] = False
-    fields = {field: event.get(key) for key, field in {
-        'pid': 'proc.pid', 'process': 'proc.name', 'file': 'fd.name',
-        'is_open_write': 'evt.is_open_write', 'syscall': 'evt.type'}.items()}
-    alert = {'rule': RULE, 'time': event['event_time'], 'priority': event.get('priority', 'WARNING'),
-             'output_fields': fields}
-    with tempfile.TemporaryDirectory(prefix='lrss-isolated-score-') as directory:
-        store = StateStore(Path(directory) / 'test.db')
-        try:
-            scorer = RiskScorer(isolated, store)
-            first = scorer.process_falco_event(alert)
-            score = scorer.runtime_score
-            second = scorer.process_falco_event(alert)
-            expected = isolated['runtime_rules']['specific_rules'][RULE]['points']
-            if first['deducted_points'] != expected or score != 100 - expected or second['deducted_points'] != 0:
-                raise ValueError('独立测试计分或重复去重不符合策略')
-            return score
-        finally:
-            store.close()
-
-
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--scenario', choices=('file-write', 'shm-exec'), default='file-write',
+                        help='file-write: 演示文件写入；shm-exec: /dev/shm 无害脚本；均参与实际评分')
     parser.add_argument("--write-demo", nargs=3, help=argparse.SUPPRESS)
     args = parser.parse_args()
     if os.name != "posix":
@@ -105,26 +117,34 @@ def main():
     if args.write_demo:
         return write_demo(*args.write_demo)
     try:
-        if os.geteuid() != 0:
+        if args.scenario == 'file-write' and os.geteuid() != 0:
             subprocess.run(['sudo', '-v'], check=True)
         data = DashboardData(Path(__file__).with_name("policy_config.yaml"))
         before = data.snapshot()
         if not before['availability']['ready']:
             raise ValueError('评分尚不可用：' + before['availability']['reason'])
+        rule = RULE if args.scenario == 'file-write' else SHM_RULE
+        policy = data.config['runtime_rules']['specific_rules'][rule]
+        if policy.get('test_only') or not policy.get('enabled', True) or policy.get('points', 0) <= 0:
+            raise ValueError('当前规则未开启实际计分；请更新项目并重新部署')
+        print(f"本次规则：{rule}；风险值 {policy['points']} 分；参与网页和评分接口的实际计分。", flush=True)
         with closing(data._connect()) as db:
             after = db.execute("SELECT COALESCE(MAX(id), 0) FROM events").fetchone()[0]
-        info = TARGET.lstat()
-        if not stat.S_ISREG(info.st_mode):
-            raise ValueError("Demo target must be an existing regular file, not a symlink")
         token = "lrss-verify-" + uuid.uuid4().hex[:12]
-        command = ([] if os.geteuid() == 0 else ["sudo"]) + [
-            "/usr/bin/python3", str(Path(__file__).resolve()), "--write-demo", token, str(info.st_dev), str(info.st_ino)]
         started = time.time()
-        completed = subprocess.run(command, text=True, capture_output=True, timeout=90, check=True)
+        if args.scenario == 'file-write':
+            info = TARGET.lstat()
+            if not stat.S_ISREG(info.st_mode):
+                raise ValueError("Demo target must be an existing regular file, not a symlink")
+            command = ([] if os.geteuid() == 0 else ["sudo"]) + [
+                "/usr/bin/python3", str(Path(__file__).resolve()), "--write-demo", token, str(info.st_dev), str(info.st_ino)]
+            completed = subprocess.run(command, text=True, capture_output=True, timeout=90, check=True)
+            attempt = {**json.loads(completed.stdout), 'file': str(TARGET)}
+        else:
+            attempt = run_shm_demo()
         finished = time.time()
-        attempt = json.loads(completed.stdout)
-        print(f"测试编号：{token} | PID：{attempt['pid']} | 文件：{TARGET}")
-        print("实际写入结果：" + {"written": "成功", "denied": "EPERM 拒绝", "error": "失败"}[attempt["outcome"]])
+        print(f"测试编号：{token} | PID：{attempt['pid']} | 文件：{attempt['file']}")
+        print("操作结果：" + {"written": "写入成功", "executed": "无害脚本执行成功，临时文件已删除", "denied": "EPERM 拒绝", "error": "失败"}[attempt["outcome"]])
         if attempt.get("error"):
             print(attempt["error"])
         print(f"本次证据：http://127.0.0.1:8766/?pid={attempt['pid']}&after={after}")
@@ -132,41 +152,37 @@ def main():
         while True:
             with closing(data._connect()) as db:
                 events = data._events(db, after=after, pid=attempt["pid"])
-            success, falco = evaluate(events, attempt)
+            success, falco = evaluate(events, attempt, rule)
             if success or time.monotonic() >= deadline:
                 break
             time.sleep(0.5)
         for event in falco:
             print(f"{event['source']} #{event['id']} | {event['rule']} | {event['status']} | 历史扣分 {event['deducted_points']}")
         if success:
-            check_probe_times(falco, started, finished)
+            check_probe_times(falco, started, finished, rule)
             after_snapshot = data.snapshot()
             risks = after_snapshot['runtime_risks']
-            active = next((r['points'] for r in risks if r['rule'] == RULE), None)
-            policy = data.config['runtime_rules']['specific_rules'][RULE]
+            active = next((r['points'] for r in risks if r['rule'] == rule), None)
             expected = policy['points']
-            matching = [e for e in falco if e['rule'] == RULE]
-            if policy.get('test_only'):
-                if not matching or active is not None or any(e['status'] != 'test_event' or e['deducted_points'] != 0 for e in matching):
-                    raise ValueError('验收事件未与实际评分隔离')
-                isolated_score = score_test_evidence(data.config, matching[0])
-                print(f'独立验收运行时分：100 → {isolated_score}；重复证据不再次扣分。')
-            elif not matching or active != expected:
+            if active != expected or any(e['status'] not in ('scored', 'risk_refreshed') for e in falco):
                 raise ValueError(f'验收规则未正确计分：期望 {expected}，实际 {active}')
             if not after_snapshot['availability']['ready']:
                 raise ValueError('测试后评分不可用：' + after_snapshot['availability']['reason'])
             scores = after_snapshot['scores']
             if scores['runtime'] != max(0, 100 - sum(r['points'] for r in risks)):
                 raise ValueError('运行时总分与当前风险明细不一致')
-            prior = next((r['points'] for r in before['runtime_risks'] if r['rule'] == RULE), 0)
-            print('测试前分数：' + json.dumps(before['scores'], ensure_ascii=False))
-            print('测试后分数：' + json.dumps(scores, ensure_ascii=False))
+            prior = next((r['points'] for r in before['runtime_risks'] if r['rule'] == rule), 0)
+            deducted = sum(e['deducted_points'] for e in falco)
+            print(f"实际运行时分：{before['scores']['runtime']} → {scores['runtime']}；本次证据新增扣分：{deducted}")
+            print(f"实际综合分：{before['scores']['final']} → {scores['final']}（按当前权重计算，不一定下降 10 分）")
+            for explanation in dict.fromkeys((e.get('score_effect') or {}).get('explanation', '查看网页证据详情') for e in falco):
+                print('计分原因：' + explanation)
             print(f'本规则实际风险：{prior} → {active or 0} 分；其他并发告警可能影响总分。')
-            print("PASS：真实写入、同 PID 告警、规则风险值和运行时总分对账一致（不代表完整攻击覆盖）。")
+            print("验证通过（PASS）：真实操作、同 PID 告警入库、实际计分和总分对账通过；不代表全部规则测试通过。")
             return 0
-        print("FAIL：结果或证据不完整；不要仅凭服务 active 判断成功。")
+        print("验证失败（FAIL）：结果或证据不完整；不要仅凭服务 active 判断成功。")
         if not falco:
-            print("未找到本次 PID 的写入告警；检查 Falco 服务、规则和 PID 输出配置。")
+            print("未找到本次 PID、规则和目标对应的告警；检查 Falco 服务、规则及输出字段。")
         return 1
     except subprocess.CalledProcessError as error:
         print("FAIL：测试写入命令执行失败；请在可输入 sudo 密码的 Ubuntu 终端运行。")

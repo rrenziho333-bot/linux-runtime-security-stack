@@ -1,6 +1,6 @@
 meta:
   policy_id: "tsa-fusion-v1"
-  version: "3.2.0"
+  version: "3.3.0"
 
 storage:
   state_db: "state/tsa.db"
@@ -274,7 +274,6 @@ runtime_rules:
       risk_ttl_seconds: 3600
       reason: "历史记录删除或重命名"
     "Monitor specific file access":
-      points: 1
-      test_only: true
+      points: 10
       risk_ttl_seconds: 900
-      reason: "专用演示文件，独立验收计 1 分，实际风险不扣分"
+      reason: "演示文件访问，按配置实际计 10 分；用于可视化验收，不表示确认攻击"

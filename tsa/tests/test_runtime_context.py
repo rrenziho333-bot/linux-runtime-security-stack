@@ -10,7 +10,8 @@ import yaml
 
 from runtime_context import advisory_reason, apply_signal_budget, score_effect, validate_runtime_config
 from tsa_core import RiskScorer, StateStore, runtime_risk_breakdown
-from verify_runtime import RULE, score_test_evidence
+from tsa_dashboard import DashboardData
+from verify_runtime import RULE, SHM_RULE
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -131,15 +132,41 @@ class ContextScoringTests(unittest.TestCase):
         self.scorer.refresh_runtime_score(self.now + 14401)
         self.assertEqual(self.scorer.runtime_score, 100)
 
-    def test_demo_isolated_scoring_never_changes_live_database(self):
+    def test_two_live_examples_score_ten_each_and_repeats_only_renew(self):
         result = self.emit(RULE)
-        self.assertEqual(result['status'], 'test_event')
-        self.assertEqual(result['deducted_points'], 0)
+        self.assertEqual(result['status'], 'scored')
+        self.assertEqual(result['deducted_points'], 10)
+        self.assertEqual(self.scorer.runtime_score, 90)
+        self.assertEqual(self.emit(RULE)['deducted_points'], 0)
+        self.assertEqual(self.scorer.runtime_score, 90)
+        self.assertEqual(self.emit(SHM_RULE)['deducted_points'], 10)
+        self.assertEqual(self.scorer.runtime_score, 80)
+        self.assertEqual(self.emit(SHM_RULE)['deducted_points'], 0)
+        self.assertEqual(self.scorer.runtime_score, 80)
+        self.scorer.refresh_runtime_score(self.now + 901)
+        self.assertEqual(self.scorer.runtime_score, 90)
+        self.scorer.refresh_runtime_score(self.now + 14401)
         self.assertEqual(self.scorer.runtime_score, 100)
-        event = {'event_time':datetime.now(timezone.utc).isoformat(), 'pid':123, 'file':'/etc/tsa-protected-demo'}
-        self.assertEqual(score_test_evidence(self.config, event), 99)
-        self.assertEqual(self.store.db.execute('SELECT COUNT(*) FROM events').fetchone()[0], 1)
-        self.assertEqual(runtime_risk_breakdown(self.store.db, self.config['runtime_rules'], self.now), [])
+
+    def test_historical_test_only_records_are_not_retroactively_charged(self):
+        self.config['runtime_rules']['specific_rules'][RULE]['test_only'] = True
+        self.assertEqual(self.emit(RULE)['status'], 'test_event')
+        self.config['runtime_rules']['specific_rules'][RULE]['test_only'] = False
+        self.scorer.refresh_runtime_score(self.now)
+        self.assertEqual(self.scorer.runtime_score, 100)
+        self.assertEqual(self.emit(RULE)['deducted_points'], 10)
+
+    def test_live_examples_use_the_same_dashboard_weighted_scores(self):
+        data = object.__new__(DashboardData)
+        data.config = self.config
+        state = {'posture_score':85, 'baseline_status':'ok'}
+        weights = {'posture':0.4, 'runtime':0.6}
+        for rule, runtime, final in [(None,100,94),(RULE,90,88),(RULE,90,88),
+                                     (SHM_RULE,80,82),(SHM_RULE,80,82)]:
+            if rule:
+                self.emit(rule)
+            self.assertEqual(data._scores(self.store.db,state,weights=weights),
+                             {'posture':85.0,'runtime':float(runtime),'final':float(final)})
 
     def test_unsafe_configuration_is_rejected(self):
         runtime = copy.deepcopy(self.config['runtime_rules'])
